@@ -135,32 +135,30 @@ That is the pattern for all three additions — fires, upwind corridor, coupling
 Each is small, each is smaller than its own fold-to-fold spread, and the fix is
 **more winters, not more features**. See `POSITIONING.md` section 5.
 
-### 2. Confirm the daily archive is actually running
-`cams_runs` and `meteo_runs` hold 2 runs each (2026-08-23, 2026-08-24); the job
-itself is proven and idempotent. What is not yet proven is that it runs
-*unattended*.
+### 2. Confirm the archive keeps running (verify by the log)
+The job is proven and idempotent; `cams_runs` and `meteo_runs` hold runs for
+2026-08-23 and 2026-08-24.
 
-Windows Task Scheduler refused to launch it with the error:
+**It runs at logon, via the Startup folder** — not Task Scheduler. A shortcut to
+`scripts/run_archive.bat` lives in
+`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`, starting
+minimised. On a laptop this is more reliable than a fixed 06:30 trigger, which
+only fires if the machine happens to be awake at that moment.
+
+Windows Task Scheduler was tried first and abandoned. It refused to launch with:
 
     Task Scheduler did not launch task "\Airshed-Archive" because user
     "<domain>\<user>" was not logged on when the launching conditions were met.
 
-That is `LogonType=InteractiveToken` being unhappy with the session, which is
-common on machines signed in with a Microsoft account. Two fixes, either is fine:
+That is `LogonType=InteractiveToken` rejecting the session, common on machines
+signed in with a Microsoft account. `LogonType=S4U` would fix it if anyone wants
+Task Scheduler back, but the Startup route is simpler and needs no elevation.
 
-- switch the principal to S4U (runs logged on or not, no stored password):
+**Check it by the log, never by the launcher's own report.** `schtasks /run`
+printed "SUCCESS: Attempted" three times while nothing ran at all. The truth is
+a fresh timestamp in `data/archive.log`:
 
-      $p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
-      Set-ScheduledTask -TaskName "Airshed-Archive" -Principal $p
-
-- or skip Task Scheduler: put a shortcut to `scripts/run_archive.bat` in
-  `shell:startup` so it runs at every logon. On a laptop this is arguably more
-  reliable than a fixed 06:30 trigger.
-
-Check it worked with `Get-ScheduledTaskInfo -TaskName "Airshed-Archive"`
-(`LastTaskResult 0`) or by looking for a fresh timestamp in
-`data/archive.log`. **Verify by the log, not by the task reporting success** —
-`schtasks /run` reports "Attempted" even when nothing runs at all.
+    Get-Content C:\SIH\datarchive.log -Tail 3
 
 Why it matters: archived forecast runs cannot be recovered retrospectively.
 Every day the job does not run is a day of true 72 h forecast history lost, and
