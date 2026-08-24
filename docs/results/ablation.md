@@ -1,6 +1,6 @@
 # Ablation — Phase 2
 
-Generated 2026-08-24 09:19 UTC. Regenerate with `airshed ablation`.
+Generated 2026-08-24 12:17 UTC. Regenerate with `airshed ablation`.
 
 - data range: `2025-02-18` to `2026-08-19`
 - trained on 806,438 rows (2025-02-19 to 2026-08-18)
@@ -10,6 +10,9 @@ Generated 2026-08-24 09:19 UTC. Regenerate with `airshed ablation`.
 
 
 Splits are time blocks with whole-episode holdout and a 96 h embargo (R3). Persistence appears in every table (R2). `skill` is the RMSE reduction against persistence: 0 means no better, negative means worse.
+
+
+> **Read the horizon columns with `leadmatch.md` open.** The forecast inputs here come from the archives, which return the *best available* forecast for each past hour — a short-lead one. Re-scoring the same rows with meteorology at real forecast lead costs about 1% (worse on 4/5 rolling folds), and CAMS cannot be lead-matched at all. The comparisons in this table are sound because every model reads the same inputs; the absolute 48 and 72 h numbers are optimistic by roughly that much.
 
 
 ## RMSE by horizon (µg/m³, lower is better)

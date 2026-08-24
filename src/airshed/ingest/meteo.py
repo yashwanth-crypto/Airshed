@@ -37,8 +37,9 @@ from pathlib import Path
 import polars as pl
 
 from ..config import Config, load_config
-from ..store import missing_dates, write_partitioned
+from ..store import missing_dates, partition_path, write_partitioned
 from .openmeteo import (
+    Point,
     date_chunks,
     fetch_hourly,
     fetch_hourly_by_cell,
@@ -51,6 +52,7 @@ log = logging.getLogger(__name__)
 RUNS_DATASET = "meteo_runs"
 CHUNK_DAYS = 30
 ARCHIVE_DATASET = "meteo_archive"
+LEADMATCHED_DATASET = "meteo_leadmatched"
 
 
 def fetch_training(
@@ -160,12 +162,283 @@ def backfill(
     return written
 
 
+def backfill_new_stations(
+    start: dt.date | str,
+    end: dt.date | str,
+    cfg: Config | None = None,
+    station_ids: list[str] | None = None,
+    chunk_days: int = 10,
+) -> list[Path]:
+    """Fetch archived meteorology for stations the partitions do not carry.
+
+    `repair.expand` copies a cell-mate's rows and needs no network, which is the
+    right tool when a new station lands inside a cell we already fetched. It is
+    the wrong tool here. GFS cells are ~0.11 deg, and the 2026-08 expansion put
+    stations 0.25-0.44 deg from the nearest served cell — Meerut is four cells
+    out. Copying would have handed those stations weather from up to 49 km away
+    and nothing would have complained.
+
+    So: resolve the real cells for these stations, fetch them, merge. The cost
+    is only the genuinely new cells, because `fetch_hourly_by_cell` requests one
+    series per distinct cell however many stations share it.
+    """
+    cfg = cfg or load_config()
+    src = cfg.source("meteo")
+    start_d, end_d = _as_date(start), _as_date(end)
+
+    if station_ids is None:
+        from .repair import missing_stations
+
+        station_ids = missing_stations(ARCHIVE_DATASET, cfg)
+    if not station_ids:
+        log.info("%s already carries every configured station", ARCHIVE_DATASET)
+        return []
+
+    by_id = {s.id: s for s in cfg.stations}
+    points = [
+        Point(s.id, s.lat, s.lon, station_name=s.name)
+        for s in (by_id[i] for i in station_ids if i in by_id)
+    ]
+    # A fresh cell map for these points only, and deliberately not the cached
+    # one: the cache is keyed to the full station set and adding stations
+    # invalidates it, so reusing it here would silently reintroduce the wrong
+    # cell for exactly the stations this function exists to fix.
+    cells = resolve_cells(src["training_url"], points, {"models": src["model"]})
+    log.info(
+        "meteo for %d new station(s) over %d distinct cell(s)",
+        len(points), len(set(cells.values())),
+    )
+
+    # Smaller chunks than `backfill` uses. That path asks for 16 cells; the
+    # 2026-08 expansion spread the new stations over more cells than that, and
+    # 30 days x 28 variables x ~20 cells in one request read-timed out and lost
+    # the whole run. Requests are cheap; a run that dies at day 500 is not.
+    written: list[Path] = []
+    for chunk_start, chunk_end in date_chunks(start_d, end_d, days=chunk_days):
+        log.info("meteo (new stations) %s..%s", chunk_start, chunk_end)
+        try:
+            fresh = _fetch_window(src, points, cells, chunk_start, chunk_end)
+        except Exception as exc:
+            # Keep going and report the hole. Losing 500 good days because day
+            # 501 timed out is the failure mode this backfill already hit once.
+            log.error(
+                "meteo chunk %s..%s failed, continuing: %s",
+                chunk_start, chunk_end, str(exc)[:200],
+            )
+            continue
+        if fresh.is_empty():
+            log.warning("meteo empty for %s..%s", chunk_start, chunk_end)
+            continue
+        for day, part in fresh.with_columns(
+            pl.col("time").dt.date().alias("_d")
+        ).group_by("_d", maintain_order=True):
+            day = day[0] if isinstance(day, tuple) else day
+            path = partition_path(ARCHIVE_DATASET, day)
+            part = part.drop("_d")
+            if path.is_file():
+                merged = pl.concat(
+                    [pl.read_parquet(path), part], how="diagonal_relaxed"
+                )
+            else:
+                merged = part
+            # Existing rows win: a refetch must not rewrite audited history.
+            merged = merged.unique(subset=["station_id", "time"], keep="first")
+            written += write_partitioned(merged, ARCHIVE_DATASET)
+    log.info("merged new stations into %d partition(s)", len(written))
+    return written
+
+
 def archive_run(cfg: Config | None = None, forecast_days: int | None = None) -> list[Path]:
     """Cache the live run. Cron job partner to `cams.archive_run` (R8)."""
     df = fetch_serving(cfg=cfg, forecast_days=forecast_days)
     if df.is_empty():
         return []
     return write_partitioned(df, RUNS_DATASET, partition_col="issue_time")
+
+
+# ---------------------------------------------------------------------------
+# Lead-matched training meteorology
+# ---------------------------------------------------------------------------
+# `fetch_training` returns the best available forecast for each past hour, which
+# is a short-lead one. A model trained on that and served a real 72 h forecast is
+# reading a cleaner input in training than it will ever get in production — the
+# same failure mode R1 names for ERA5, one level down. The Previous Runs API
+# serves, for a valid hour on day D, the value from the run initialised D-N, so
+# training can see the forecast at the lead it will actually be used at.
+#
+# Not every variable is available this way, and the ones that are not include
+# the most important one. See `lead_matched_unavailable` in config.toml: BLH,
+# visibility and every pressure-level variable have no `_previous_dayN` form.
+# Those columns stay short-lead here and the gap closes only forward, as
+# `meteo_runs` accumulates. Nothing about that is hidden: `lead_day` is on every
+# row, and the feature builder marks which columns it actually replaced.
+
+
+def fetch_previous_runs(
+    start: dt.date | str,
+    end: dt.date | str,
+    cfg: Config | None = None,
+    lead_days: list[int] | None = None,
+    station_ids: list[str] | None = None,
+    cells: dict[str, tuple[float, float]] | None = None,
+) -> pl.DataFrame:
+    """Archived forecasts at *known lead*, long-format on `lead_day`.
+
+    One row per (station_id, time, lead_day). `lead_day = N` means the value
+    came from the run initialised N days before the valid day, so the true lead
+    is `24N + hour_of_day` — a range, not a point, and deliberately the
+    pessimistic end of it: lead_day 3 covers 72-95 h, never less than 72.
+    """
+    cfg = cfg or load_config()
+    src = cfg.source("meteo")
+    days = lead_days or list(src["lead_matched_days"])
+    variables = list(src["lead_matched_hourly"])
+    start_d, end_d = _as_date(start), _as_date(end)
+
+    points = station_points(cfg)
+    if station_ids is not None:
+        wanted = set(station_ids)
+        points = [p for p in points if p.key in wanted]
+    if cells is None:
+        # Resolving costs a request, so a caller looping over chunks must pass
+        # `cells` in rather than letting every chunk rediscover the same map.
+        # Not doing that is what earned a 429 and stalled this backfill at
+        # 2026-02-12: 56 chunks meant 56 redundant probe calls.
+        #
+        # No `cache_key` for a subset: the cached map is keyed to the full
+        # station set, and reusing it here would resolve these stations against
+        # cells chosen for someone else.
+        cells = (
+            resolve_cells(src["previous_runs_url"], points, {"models": src["model"]})
+            if station_ids is not None
+            else resolve_cells(
+                src["previous_runs_url"], points, {"models": src["model"]},
+                cache_key="meteo",
+            )
+        )
+    hourly = [f"{v}_previous_day{d}" for d in days for v in variables]
+
+    frames = []
+    for chunk_start, chunk_end in date_chunks(start_d, end_d, days=CHUNK_DAYS):
+        log.info("meteo previous-runs %s..%s", chunk_start, chunk_end)
+        wide = fetch_hourly_by_cell(
+            url=src["previous_runs_url"],
+            points=points,
+            hourly=hourly,
+            cells=cells,
+            extra_params={
+                "start_date": chunk_start.isoformat(),
+                "end_date": chunk_end.isoformat(),
+                "models": src["model"],
+            },
+        )
+        if wide.is_empty():
+            log.warning("meteo previous-runs empty for %s..%s", chunk_start, chunk_end)
+            continue
+        frames.append(_to_long(wide, variables, days))
+
+    if not frames:
+        return pl.DataFrame()
+    return pl.concat(frames, how="vertical_relaxed").sort(
+        ["station_id", "time", "lead_day"]
+    )
+
+
+def _to_long(wide: pl.DataFrame, variables: list[str], days: list[int]) -> pl.DataFrame:
+    """One wide frame of `<var>_previous_dayN` columns -> one row per lead day.
+
+    Stacking rather than widening keeps the column names identical to
+    `meteo_archive`, so the feature builder can substitute one for the other
+    without a second naming convention to keep straight.
+    """
+    keep = [c for c in ("station_id", "time", "cell_lat", "cell_lon") if c in wide.columns]
+    out = []
+    for d in days:
+        cols = {f"{v}_previous_day{d}": v for v in variables if f"{v}_previous_day{d}" in wide.columns}
+        if not cols:
+            continue
+        part = wide.select(keep + list(cols)).rename(cols).with_columns(
+            pl.lit(d, dtype=pl.Int32).alias("lead_day"),
+            pl.lit("previous_run").alias("source_class"),
+        )
+        out.append(_derive(part))
+    if not out:
+        return pl.DataFrame()
+    return pl.concat(out, how="vertical_relaxed")
+
+
+def backfill_previous_runs(
+    start: dt.date | str,
+    end: dt.date | str,
+    cfg: Config | None = None,
+    skip_existing: bool = True,
+    station_ids: list[str] | None = None,
+    chunk_days: int = CHUNK_DAYS,
+) -> list[Path]:
+    """Cache lead-matched meteorology, chunked and resumable like `backfill`.
+
+    `station_ids` switches to merge mode: fetch only those stations and add them
+    to whatever each partition already holds. Without it, `skip_existing` would
+    see every partition present and fetch nothing at all for a station added
+    after the first backfill — which is how a new station ends up silently
+    absent from one dataset while looking complete in the others.
+    """
+    cfg = cfg or load_config()
+    start_d, end_d = _as_date(start), _as_date(end)
+    merging = station_ids is not None
+
+    # Resolve the cell map exactly once for the whole backfill.
+    src = cfg.source("meteo")
+    points = station_points(cfg)
+    if merging:
+        wanted = set(station_ids)
+        points = [p for p in points if p.key in wanted]
+        cells = resolve_cells(src["previous_runs_url"], points, {"models": src["model"]})
+    else:
+        cells = resolve_cells(
+            src["previous_runs_url"], points, {"models": src["model"]}, cache_key="meteo"
+        )
+
+    written: list[Path] = []
+    for chunk_start, chunk_end in date_chunks(start_d, end_d, days=chunk_days):
+        if (
+            not merging
+            and skip_existing
+            and not missing_dates(LEADMATCHED_DATASET, chunk_start, chunk_end)
+        ):
+            log.info("meteo lead-matched %s..%s already cached", chunk_start, chunk_end)
+            continue
+        try:
+            df = fetch_previous_runs(
+                chunk_start, chunk_end, cfg=cfg, station_ids=station_ids, cells=cells
+            )
+        except Exception as exc:
+            log.error(
+                "lead-matched chunk %s..%s failed, continuing: %s",
+                chunk_start, chunk_end, str(exc)[:200],
+            )
+            continue
+        if df.is_empty():
+            continue
+        if not merging:
+            written += write_partitioned(df, LEADMATCHED_DATASET)
+            continue
+        for day, part in df.with_columns(
+            pl.col("time").dt.date().alias("_d")
+        ).group_by("_d", maintain_order=True):
+            day = day[0] if isinstance(day, tuple) else day
+            path = partition_path(LEADMATCHED_DATASET, day)
+            part = part.drop("_d")
+            merged = (
+                pl.concat([pl.read_parquet(path), part], how="diagonal_relaxed")
+                if path.is_file()
+                else part
+            )
+            merged = merged.unique(
+                subset=["station_id", "time", "lead_day"], keep="first"
+            )
+            written += write_partitioned(merged, LEADMATCHED_DATASET)
+    return written
 
 
 def check_variables(cfg: Config | None = None) -> dict[str, float]:

@@ -49,6 +49,7 @@ issue_hour_utc = 0          # nominal daily issue time (05:30 IST)
 [grap]
 aggregate = "city_mean_aqi"
 
+
 [[grap.stages]]
 stage      = 1
 name       = "Poor"
@@ -153,6 +154,53 @@ hourly       = [
   "wind_direction_925hPa", "geopotential_height_925hPa",
 ]
 forecast_days = 5
+
+# ---------------------------------------------------------------------------
+# Lead-matched training meteorology (Previous Runs API)
+# ---------------------------------------------------------------------------
+# `training_url` above returns the *best available* forecast for each past
+# hour, which in practice is a short-lead one. Training on that and serving a
+# genuine 72 h forecast is the same class of distribution mismatch R1 exists to
+# prevent, one level down: not reanalysis-vs-forecast, but short-lead-vs-long-
+# lead. The Previous Runs API fixes it by serving, for a valid hour on day D,
+# the value from the run initialised on day D-N.
+#
+#   lead_day N  ->  lead = 24N + hour_of_day, i.e. N=1 covers 24-47 h.
+#
+# Verified 2026-08-24 against our own stored `meteo_runs`: the API's main
+# series reproduced the run we archived that morning exactly (max diff 0.000
+# over 24 h), and `previous_day1` reproduced the previous day's run. Coverage
+# is 48/48 non-null at 2025-02-18, 2025-06-01, 2025-11-05 and 2026-08-20, so
+# the whole trainable era is served.
+previous_runs_url = "https://previous-runs-api.open-meteo.com/v1/forecast"
+lead_matched_days = [1, 2, 3]
+
+# Only these variables have `_previous_dayN` variants. Measured, not assumed.
+lead_matched_hourly = [
+  "temperature_2m", "relative_humidity_2m", "dew_point_2m", "surface_pressure",
+  "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", "wind_speed_100m",
+  "wind_direction_100m", "precipitation", "cloud_cover", "shortwave_radiation",
+  "cape",
+]
+
+# These CANNOT be lead-matched retrospectively, and it matters that the list is
+# written down rather than discovered again later:
+#   boundary_layer_height, visibility  -> `_previous_dayN` returns 0/72 non-null
+#                                         on every GFS variant tried
+#   temperature_925hPa, temperature_850hPa, wind_speed_925hPa,
+#   wind_direction_925hPa, geopotential_height_925hPa
+#                                      -> HTTP 400, the API rejects
+#                                         `_previous_dayN` on pressure levels
+# Consequence: BLH, the inversion features and ventilation_index stay
+# short-lead in training. At *serving* time they are genuine long-lead values
+# from the live run, so this is a residual train/serve gap that can only be
+# closed forward, as `meteo_runs` accumulates. Any row built this way carries
+# `met_lead_matched = false` for those columns' sake.
+lead_matched_unavailable = [
+  "boundary_layer_height", "visibility", "temperature_925hPa",
+  "temperature_850hPa", "wind_speed_925hPa", "wind_direction_925hPa",
+  "geopotential_height_925hPa",
+]
 
 [sources.metar]
 url        = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"

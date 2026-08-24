@@ -81,8 +81,15 @@ def load_supervised(
     start: str,
     end: str,
     cfg: Config | None = None,
+    lead_matched: bool = False,
 ) -> pl.DataFrame:
-    """Build the supervised table from cache and label its splits."""
+    """Build the supervised table from cache and label its splits.
+
+    `lead_matched` swaps the forecast meteorology for the value that was really
+    available `horizon_h` hours ahead, instead of the short-lead value the
+    archive returns. It changes no rows, only columns, so a table built with it
+    stays comparable row-for-row with one built without.
+    """
     cfg = cfg or load_config()
     base = feat.build_base(start, end, cfg=cfg)
     sup = feat.build_supervised(
@@ -95,6 +102,8 @@ def load_supervised(
     )
     if sup.is_empty():
         return sup
+    if lead_matched:
+        sup = feat.apply_lead_matched_meteo(sup, cfg=cfg)
     return split_mod.assign_split(sup, cfg=cfg)
 
 
@@ -269,6 +278,21 @@ def to_markdown(table: pl.DataFrame, meta: dict) -> str:
         "\nSplits are time blocks with whole-episode holdout and a 96 h embargo "
         "(R3). Persistence appears in every table (R2). `skill` is the RMSE "
         "reduction against persistence: 0 means no better, negative means worse.\n"
+    )
+
+    # Anyone reading this table alone would quote the 48 and 72 h columns as
+    # they stand. They are built from short-lead meteorology and short-lead
+    # CAMS, so they are mildly optimistic, and the pointer belongs next to the
+    # numbers rather than in a document nobody opens second.
+    lines.append(
+        "\n> **Read the horizon columns with `leadmatch.md` open.** The forecast "
+        "inputs here come from the archives, which return the *best available* "
+        "forecast for each past hour — a short-lead one. Re-scoring the same "
+        "rows with meteorology at real forecast lead costs about 1% (worse on "
+        "4/5 rolling folds), and CAMS cannot be lead-matched at all. The "
+        "comparisons in this table are sound because every model reads the same "
+        "inputs; the absolute 48 and 72 h numbers are optimistic by roughly "
+        "that much.\n"
     )
 
     lines.append("\n## RMSE by horizon (µg/m³, lower is better)\n")

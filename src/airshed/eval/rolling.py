@@ -92,8 +92,15 @@ def run(
     cfg: Config | None = None,
     folds: list[dict] | None = None,
     resume: bool = True,
+    lead_matched: bool = False,
 ) -> tuple[pl.DataFrame, dict]:
-    """Score every model on every fold. Resumable."""
+    """Score every model on every fold. Resumable.
+
+    `lead_matched` adds a second pass in which the forecast meteorology is the
+    value genuinely available `horizon_h` hours earlier rather than the
+    short-lead archive value, so the optimism measured on a single split in
+    `leadmatch.md` gets the same error bars as every other contested claim.
+    """
     cfg = cfg or load_config()
     folds = folds or default_folds(cfg)
 
@@ -126,13 +133,69 @@ def run(
         log.info("fold %s checkpointed to %s", fold["label"], path.name)
         results.extend(rows)
 
+    # Second pass with meteorology at real forecast lead. It is a change of
+    # columns, not of model, so it cannot be expressed as another entry in
+    # `fold_models()` — the frame itself has to be rebuilt. Only `full` is
+    # re-run: the baselines use no meteorology and would produce identical
+    # rows, and the point of this pass is one paired comparison.
+    if lead_matched:
+        log.info("rebuilding supervised table with lead-matched meteorology")
+        sup_lm = feat.apply_lead_matched_meteo(
+            feat.build_supervised(
+                base, cfg=cfg, extra_targets={"y_vis": "metar_visibility_km"}
+            ),
+            cfg=cfg,
+        ).drop_nulls(needed)
+        # The paired comparison is only valid if both passes see the same rows.
+        # At 100% coverage the filter below is a no-op; below that, the two
+        # columns describe different row sets and the difference between them
+        # stops meaning what the table says it means.
+        covered = float(sup_lm["met_lead_matched"].mean() or 0.0)
+        if covered < 0.999:
+            log.warning(
+                "lead-matched meteorology reached only %.1f%% of rows — the "
+                "paired comparison against `full` is NOT row-for-row and must "
+                "not be read as one",
+                100 * covered,
+            )
+        else:
+            log.info("lead-matched meteorology reached %.1f%% of rows", 100 * covered)
+        sup_lm = sup_lm.filter(pl.col("met_lead_matched"))
+
+        lm_models = [
+            CorrectorModel(
+                use_obs_history=True, use_meteo=True, name="full",
+                drop_prefixes=("upwind_",),
+            )
+        ]
+        for fold in folds:
+            path = _checkpoint_path(cfg, fold["label"] + "-leadmatched")
+            if resume and path.is_file():
+                log.info("fold %s (lead-matched) already done", fold["label"])
+                results.extend(json.loads(path.read_text(encoding="utf-8")))
+                continue
+            rows = _run_fold(
+                sup_lm, fold, cfg, models=lm_models, suffix=" (lead-matched)"
+            )
+            if not rows:
+                continue
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(rows, indent=1), encoding="utf-8")
+            results.extend(rows)
+
     if not results:
         raise RuntimeError("no folds produced results")
     table = pl.DataFrame(results)
     return table, summarise(table)
 
 
-def _run_fold(sup: pl.DataFrame, fold: dict, cfg: Config) -> list[dict]:
+def _run_fold(
+    sup: pl.DataFrame,
+    fold: dict,
+    cfg: Config,
+    models: list[Model] | None = None,
+    suffix: str = "",
+) -> list[dict]:
     train_end = _utc(fold["train_end"])
     test_start, test_end = _utc(fold["test"][0]), _utc(fold["test"][1], end_of_day=True)
     embargo = dt.timedelta(hours=EMBARGO_H)
@@ -162,7 +225,7 @@ def _run_fold(sup: pl.DataFrame, fold: dict, cfg: Config) -> list[dict]:
 
     baseline = None
     rows: list[dict] = []
-    for model in fold_models():
+    for model in (models or fold_models()):
         model.fit(train, y_train)
         pred = model.predict(test)
         if baseline is None:
@@ -172,7 +235,7 @@ def _run_fold(sup: pl.DataFrame, fold: dict, cfg: Config) -> list[dict]:
             rows.append(
                 {
                     "fold": fold["label"],
-                    "model": model.name,
+                    "model": model.name + suffix,
                     "horizon_h": row["horizon_h"],
                     "n": row["n"],
                     "rmse": _clean(row.get("rmse")),
@@ -216,14 +279,20 @@ def _paired(overall: pl.DataFrame) -> list[dict]:
     """
     comparisons = [
         # The headline claim deserves error bars as much as the contested ones.
-        ("correction vs persistence", "persistence", "full+upwind"),
-        ("correction vs raw CAMS", "raw-cams", "full+upwind"),
-        ("upwind fires", "full (no fires)", "full"),
-        ("upwind corridor", "full", "full+upwind"),
-        ("coupling", "full", "coupled"),
+        ("correction vs persistence", "persistence", "full+upwind", "addition"),
+        ("correction vs raw CAMS", "raw-cams", "full+upwind", "addition"),
+        ("upwind fires", "full (no fires)", "full", "addition"),
+        ("upwind corridor", "full", "full+upwind", "addition"),
+        ("coupling", "full", "coupled", "addition"),
+        # Not an addition, and the sign convention matters. For every row above,
+        # the hypothesis is "the challenger helps" and a negative gain refutes
+        # it. Here the hypothesis is "the archive number was optimistic", so a
+        # negative gain *confirms* it. Labelling this one "does not hold" from
+        # the same rule would state the opposite of what it means.
+        ("lead-matched meteorology", "full", "full (lead-matched)", "penalty"),
     ]
     out = []
-    for name, reference, challenger in comparisons:
+    for name, reference, challenger, kind in comparisons:
         wide = (
             overall.filter(pl.col("model").is_in([reference, challenger]))
             .select(["fold", "model", "rmse"])
@@ -242,6 +311,7 @@ def _paired(overall: pl.DataFrame) -> list[dict]:
         out.append(
             {
                 "claim": name,
+                "kind": kind,
                 "reference": reference,
                 "challenger": challenger,
                 "best_fold": folds_order[best_i],
@@ -294,7 +364,18 @@ def to_markdown(table: pl.DataFrame, meta: dict) -> str:
         # than the fold-to-fold scatter of the gain itself.
         consistent = row["folds_better"] == row["folds"]
         exceeds_noise = sd != sd or abs(row["mean_gain"]) > sd
-        if consistent and exceeds_noise and row["mean_gain"] > 0:
+        if row.get("kind") == "penalty":
+            # A negative gain is the expected direction here, so the question is
+            # whether the cost is consistent and bigger than the scatter — not
+            # whether it is positive.
+            worse = row["folds"] - row["folds_better"]
+            if worse == row["folds"] and exceeds_noise:
+                verdict = f"**real cost, {-row['mean_gain']:.1%}**"
+            elif worse > row["folds"] / 2:
+                verdict = "cost in the expected direction, within noise"
+            else:
+                verdict = "no measurable cost"
+        elif consistent and exceeds_noise and row["mean_gain"] > 0:
             verdict = "**holds up**"
         elif row["mean_gain"] > 0 and consistent:
             verdict = "positive but within noise"
@@ -319,6 +400,7 @@ def to_markdown(table: pl.DataFrame, meta: dict) -> str:
         "that margin — and the raw-CAMS gain is largest in summer, when CAMS is "
         "furthest off.\n\n"
         + _additions_verdict(meta)
+        + _penalty_verdict(meta)
         + "\n\nThe single-split ablation is not a safe guide for effects this "
         "small. It once reported coupling as a clear negative (-0.9%, +0.3%, "
         "-1.3% by horizon) on the strength of one split that happened to fall "
@@ -331,6 +413,46 @@ def to_markdown(table: pl.DataFrame, meta: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
+def _penalty_verdict(meta: dict) -> str:
+    """Rows where a negative gain is the confirmation, not the refutation.
+
+    Kept separate from the additions paragraph on purpose. Folding "the archive
+    number was optimistic" into a list of features that failed to help would
+    report the opposite of what the numbers say.
+    """
+    rows = [r for r in meta.get("paired", []) if r.get("kind") == "penalty"]
+    if not rows:
+        return ""
+
+    parts = []
+    for row in rows:
+        sd = row["sd_gain"]
+        cost = -row["mean_gain"]
+        worse = row["folds"] - row["folds_better"]
+        sd_txt = f"{sd:.1%}" if sd == sd else "unknown"
+        line = (
+            f"\n\n**{row['claim']}.** Scoring the same rows with the input the "
+            f"model will actually be given costs {cost:+.1%}, worse on "
+            f"{worse}/{row['folds']} folds (scatter {sd_txt})."
+        )
+        if sd == sd and abs(row["mean_gain"]) <= sd:
+            line += (
+                " The cost is consistent in direction but no larger than the "
+                "fold-to-fold spread, so the honest statement is that the "
+                "optimism is real in sign and about a percent in size, not that "
+                "it has been pinned to a number. It does not move the headline "
+                "claim: the correction still beats both baselines on every fold "
+                "with either input."
+            )
+        else:
+            line += (
+                " That is larger than the fold-to-fold spread, so it is a real "
+                "cost and the lead-matched column is the one to quote."
+            )
+        parts.append(line)
+    return "".join(parts)
+
+
 def _additions_verdict(meta: dict) -> str:
     """Describe each optional addition from its own numbers.
 
@@ -341,6 +463,7 @@ def _additions_verdict(meta: dict) -> str:
     additions = [
         row for row in meta.get("paired", [])
         if row["claim"] not in ("correction vs persistence", "correction vs raw CAMS")
+        and row.get("kind") != "penalty"
     ]
     if not additions:
         return ""

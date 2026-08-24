@@ -21,6 +21,13 @@ Three correctness rules this module exists to enforce:
    for t+72 genuinely is available at t. That asymmetry is the whole design,
    and mixing it up is leakage.
 
+   There is a second, quieter version of the same hazard. A forecast for t+72
+   is available at t, but *which* forecast? The archives return the best
+   available forecast for each past hour, which is a short-lead one, so the
+   column is cleaner in training than production will ever be.
+   `apply_lead_matched_meteo` substitutes the forecast that was genuinely
+   available `horizon_h` hours earlier, for the variables that have one.
+
 3. Nothing is forward-filled across a gap. Rolling windows require a minimum
    number of real observations and return null otherwise (R6).
 """
@@ -170,6 +177,94 @@ def build_supervised(
         "supervised rows %d -> %d after dropping missing targets", before, frame.height
     )
     return frame.sort(["station_id", "issue_time", "horizon_h"])
+
+
+def lead_day_for(horizon_h: int) -> int:
+    """Which Previous-Runs lead day covers a horizon. 24 h -> 1, 48 h -> 2, 72 h -> 3.
+
+    `lead_day = N` spans true leads of 24N to 24N+23 hours, so this mapping is
+    never optimistic: a 72 h horizon is scored against a forecast that is at
+    least 72 hours old, sometimes 95.
+    """
+    return max(1, -(-int(horizon_h) // 24))
+
+
+def apply_lead_matched_meteo(
+    sup: pl.DataFrame,
+    cfg: Config | None = None,
+    dataset: str = "meteo_leadmatched",
+) -> pl.DataFrame:
+    """Replace short-lead forecast meteorology with the value at the real lead.
+
+    `build_base` reads `meteo_archive`, which returns the best available
+    forecast for each past hour — a short-lead one. Every `met_*_tgt` column is
+    therefore cleaner in training than the corresponding column will be in
+    production, and a 72 h score built on it is not a 72 h score. This swaps in
+    the forecast that was genuinely available `horizon_h` hours earlier.
+
+    Only the columns listed in `lead_matched_hourly` can be swapped. BLH,
+    visibility and the pressure-level variables have no `_previous_dayN` form
+    at all, so they keep their short-lead values and the residual optimism
+    stays real. `met_lead_matched` records, per row, whether the swap happened
+    — so nothing downstream can mistake a fallback row for a corrected one.
+    """
+    cfg = cfg or load_config()
+    if sup.is_empty():
+        return sup
+
+    src = cfg.source("meteo")
+    variables = [v for v in src.get("lead_matched_hourly", []) if f"met_{v}_tgt" in sup.columns]
+    if not variables:
+        log.warning("no lead-matchable meteorology columns present; frame unchanged")
+        return sup.with_columns(pl.lit(False).alias("met_lead_matched"))
+
+    start = sup["target_time"].min().date()
+    end = sup["target_time"].max().date()
+    lead = read_range(dataset, start, end)
+    if lead.is_empty():
+        log.warning(
+            "no cached lead-matched meteorology (%s) for %s..%s; frame unchanged",
+            dataset, start, end,
+        )
+        return sup.with_columns(pl.lit(False).alias("met_lead_matched"))
+
+    derived = [c for c in ("u10", "v10") if c in lead.columns]
+    keep = [v for v in variables if v in lead.columns] + derived
+    lead = (
+        lead.select(["station_id", "time", "lead_day"] + keep)
+        .unique(subset=["station_id", "time", "lead_day"], keep="last")
+        .rename({c: f"met_{c}_lm" for c in keep})
+        .rename({"time": "target_time"})
+    )
+
+    # Expressed natively rather than through `lead_day_for`: a Python callback
+    # per row costs minutes on a multi-million-row supervised table. The two
+    # must agree, and `tests/test_leadmatch.py` holds them to it.
+    out = sup.with_columns(
+        (((pl.col("horizon_h") + 23) // 24).clip(lower_bound=1))
+        .cast(pl.Int32)
+        .alias("lead_day")
+    ).join(lead, on=["station_id", "target_time", "lead_day"], how="left")
+
+    # A miss keeps the short-lead value rather than dropping the row: losing
+    # rows would silently change the evaluation set and make the comparison
+    # against the archive-trained model no longer like-for-like.
+    probe = f"met_{keep[0]}_lm"
+    out = out.with_columns(pl.col(probe).is_not_null().alias("met_lead_matched"))
+    out = out.with_columns(
+        [
+            pl.coalesce([pl.col(f"met_{c}_lm"), pl.col(f"met_{c}_tgt")]).alias(f"met_{c}_tgt")
+            for c in keep
+            if f"met_{c}_tgt" in out.columns
+        ]
+    )
+
+    matched = int(out["met_lead_matched"].sum())
+    log.info(
+        "lead-matched meteorology: %d/%d rows (%.1f%%), %d columns replaced",
+        matched, out.height, 100.0 * matched / out.height, len(keep),
+    )
+    return out.drop([f"met_{c}_lm" for c in keep] + ["lead_day"])
 
 
 # ---------------------------------------------------------------------------

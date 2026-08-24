@@ -59,6 +59,9 @@ EXCLUDE = {
     "split", "block_label", "station_name", "cams_source_class",
     "quality_flag", "pm25", "pm25_clean", "obs_n",
     "cell_lat", "cell_lon",
+    # Provenance, not physics. It is near-constant within any one run and would
+    # let a model split on which dataset a row came from.
+    "met_lead_matched",
 }
 
 
