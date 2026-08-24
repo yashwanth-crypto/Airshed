@@ -14,10 +14,14 @@ import logging
 import sys
 from pathlib import Path
 
+from airshed.config import repo_root
 from airshed.ingest import cams, cpcb, metar, meteo
 from airshed.store import coverage
 
-LOG = Path("data/archive.log")
+# Absolute, not relative. Task Scheduler runs with the working directory set to
+# C:\Windows\System32, so a relative path would silently put the log
+# somewhere unwritable — or worse, somewhere unexpected but writable.
+LOG = repo_root() / "data" / "archive.log"
 
 # How far back to re-check the archive datasets each day. Comfortably more than
 # any source's publication lag, so a few days of downtime heal by themselves.
