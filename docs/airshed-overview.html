@@ -1,0 +1,1013 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Airshed — 72-hour coupled air quality forecasting for Delhi NCR</title>
+<meta name="description" content="Airshed corrects a free physics forecast instead of rebuilding one, and outputs GRAP stage probabilities rather than only a concentration. Smart India Hackathon 2026, problem statement SIH26082.">
+<meta name="author" content="yashwanth-crypto">
+<meta name="color-scheme" content="light dark">
+<meta property="og:title" content="Airshed — 72-hour coupled air quality forecasting for Delhi NCR">
+<meta property="og:description" content="We don't replace the physics model — we correct it. Beats raw CAMS by 29.6% RMSE on 5 of 5 seasonal folds.">
+<meta property="og:type" content="article">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Ctext y='.9em' font-size='90'%3E%F0%9F%8C%AB%EF%B8%8F%3C/text%3E%3C/svg%3E">
+<style>
+:root{
+  --ground:#edf0f1; --surface:#ffffff; --sunk:#e3e8ea;
+  --ink:#14222c; --muted:#5a6e7a; --line:#ccd6da; --hair:#dde4e7;
+  --accent:#0e6e7c; --accent-soft:#d3e7ea;
+  --s1:#c99b12; --s2:#d1762a; --s3:#c4362f; --s4:#7a3ea8;
+  --good:#2f7d5e; --warn:#b2701a; --pill-ink:#ffffff;
+  --measure:66ch;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0c1317; --surface:#131e24; --sunk:#0a1013;
+    --ink:#e2ecf1; --muted:#90a6b2; --line:#26363e; --hair:#1d2b32;
+    --accent:#4fc3d7; --accent-soft:#12333b;
+    --s1:#f2c94c; --s2:#f2994a; --s3:#eb5757; --s4:#a86fd8;
+    --good:#5bbd93; --warn:#e0a955; --pill-ink:#10181d;
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0c1317; --surface:#131e24; --sunk:#0a1013;
+  --ink:#e2ecf1; --muted:#90a6b2; --line:#26363e; --hair:#1d2b32;
+  --accent:#4fc3d7; --accent-soft:#12333b;
+  --s1:#f2c94c; --s2:#f2994a; --s3:#eb5757; --s4:#a86fd8;
+  --good:#5bbd93; --warn:#e0a955; --pill-ink:#10181d;
+}
+
+*{box-sizing:border-box;}
+body{
+  margin:0; background:var(--ground); color:var(--ink);
+  font-family:"Source Serif 4",Georgia,serif; font-size:17px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+h1,h2,h3,.disp{font-family:Archivo,"Helvetica Neue",Arial,sans-serif; text-wrap:balance;}
+code,.mono,th,.tag,.fig figcaption b{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace;}
+
+.wrap{max-width:1180px; margin:0 auto; padding:0 26px;}
+.col{max-width:var(--measure); margin-inline:auto;}
+section{padding:58px 0; border-top:1px solid var(--hair);}
+section:first-of-type{border-top:0;}
+
+/* ---------- masthead ---------- */
+.mast{padding:64px 0 52px; background:var(--surface); border-bottom:1px solid var(--line);}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--muted); display:flex; gap:14px; flex-wrap:wrap;
+}
+.eyebrow span{white-space:nowrap;}
+.mast h1{
+  font-size:clamp(46px,8.5vw,88px); line-height:.94; letter-spacing:-.028em;
+  font-weight:700; margin:22px 0 0;
+}
+.mast .thesis{
+  font-size:clamp(19px,2.4vw,25px); line-height:1.45; margin:26px 0 0; max-width:30ch;
+  color:var(--ink);
+}
+.mast .thesis em{font-style:normal; color:var(--accent); border-bottom:2px solid var(--accent);}
+.mastgrid{display:grid; grid-template-columns:1.15fr .85fr; gap:46px; align-items:end;}
+@media(max-width:860px){.mastgrid{grid-template-columns:1fr; gap:34px;}}
+
+.keyfacts{display:grid; grid-template-columns:repeat(2,1fr); gap:1px; background:var(--line); border:1px solid var(--line);}
+.keyfacts div{background:var(--surface); padding:14px 16px;}
+.keyfacts dt{
+  font-family:"IBM Plex Mono",monospace; font-size:10.5px; letter-spacing:.13em;
+  text-transform:uppercase; color:var(--muted); margin:0 0 5px;
+}
+.keyfacts dd{margin:0; font-family:Archivo,sans-serif; font-weight:600; font-size:21px; letter-spacing:-.01em; font-variant-numeric:tabular-nums;}
+.keyfacts dd small{font-family:"Source Serif 4",serif; font-weight:400; font-size:13px; color:var(--muted); display:block; letter-spacing:0;}
+
+/* ---------- type ---------- */
+h2{font-size:clamp(27px,3.6vw,38px); line-height:1.12; letter-spacing:-.02em; font-weight:700; margin:0 0 8px;}
+h3{font-size:20px; line-height:1.25; letter-spacing:-.01em; font-weight:600; margin:34px 0 8px;}
+.kicker{
+  font-family:"IBM Plex Mono",monospace; font-size:11px; letter-spacing:.16em;
+  text-transform:uppercase; color:var(--accent); margin:0 0 14px;
+}
+p{margin:0 0 18px;}
+.lead{font-size:19.5px; line-height:1.55; color:var(--ink);}
+.muted{color:var(--muted);}
+strong{font-weight:600;}
+a{color:var(--accent);}
+ul{margin:0 0 18px; padding-left:20px;} li{margin-bottom:8px;}
+
+.pull{
+  border-left:3px solid var(--accent); padding:4px 0 4px 20px; margin:26px 0;
+  font-size:20px; line-height:1.45;
+}
+.note{
+  background:var(--surface); border:1px solid var(--line); border-left:3px solid var(--warn);
+  padding:16px 20px; margin:26px 0; font-size:15.5px; line-height:1.55;
+}
+.note b{font-family:Archivo,sans-serif;}
+
+/* ---------- tables ---------- */
+.scroll{overflow-x:auto; margin:24px 0; border:1px solid var(--line); background:var(--surface);}
+table{width:100%; border-collapse:collapse; font-size:14.5px;}
+th,td{padding:9px 13px; text-align:left; border-bottom:1px solid var(--hair); white-space:nowrap;}
+th{
+  font-size:10.5px; letter-spacing:.11em; text-transform:uppercase; color:var(--muted);
+  font-weight:500; background:var(--sunk);
+}
+td.num{text-align:right; font-variant-numeric:tabular-nums; font-family:"IBM Plex Mono",monospace; font-size:13.5px;}
+tr:last-child td{border-bottom:0;}
+tbody tr.hi td{background:var(--accent-soft);}
+td.wrap-ok{white-space:normal; min-width:19ch;}
+
+.tag{
+  display:inline-block; font-size:10.5px; letter-spacing:.08em; text-transform:uppercase;
+  padding:2px 7px; border:1px solid var(--line); color:var(--muted); border-radius:2px;
+}
+.tag.ok{color:var(--good); border-color:var(--good);}
+.tag.no{color:var(--s3); border-color:var(--s3);}
+.tag.wait{color:var(--warn); border-color:var(--warn);}
+
+/* ---------- figures ---------- */
+.fig{margin:32px 0; background:var(--surface); border:1px solid var(--line); padding:22px;}
+.fig svg{display:block; width:100%; height:auto;}
+.fig figcaption{font-size:13.5px; color:var(--muted); margin-top:14px; line-height:1.5;}
+.fig figcaption b{color:var(--ink); font-weight:500; font-size:12px;}
+
+/* ---------- pipeline ---------- */
+.pipe{display:grid; gap:1px; background:var(--line); border:1px solid var(--line); margin:28px 0;}
+.pipe > div{background:var(--surface); padding:16px 18px; display:grid; grid-template-columns:34px 1fr; gap:14px; align-items:start;}
+.pipe .n{
+  font-family:"IBM Plex Mono",monospace; font-size:12px; color:var(--accent);
+  border:1px solid var(--accent); width:28px; height:28px; display:grid; place-items:center;
+}
+.pipe h4{margin:2px 0 5px; font-family:Archivo,sans-serif; font-size:16px; font-weight:600;}
+.pipe p{margin:0; font-size:14.5px; line-height:1.5; color:var(--muted);}
+.pipe code{font-size:12.5px; color:var(--ink); background:var(--sunk); padding:1px 5px;}
+
+/* ---------- io ---------- */
+.io{display:grid; grid-template-columns:repeat(3,1fr); gap:16px; margin:28px 0;}
+@media(max-width:820px){.io{grid-template-columns:1fr;}}
+.io > div{background:var(--surface); border:1px solid var(--line); padding:18px;}
+.io h4{
+  margin:0 0 12px; font-family:"IBM Plex Mono",monospace; font-size:11px;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--accent);
+}
+.io ul{margin:0; padding-left:17px; font-size:14.5px; line-height:1.5;}
+.io li{margin-bottom:7px;}
+.io li b{font-weight:600;}
+
+/* ---------- toggle chart ---------- */
+.ctrl{display:flex; gap:8px; flex-wrap:wrap; margin-bottom:6px;}
+.ctrl button{
+  font-family:"IBM Plex Mono",monospace; font-size:11.5px; letter-spacing:.06em;
+  padding:6px 12px; background:var(--surface); color:var(--muted);
+  border:1px solid var(--line); cursor:pointer; text-transform:uppercase;
+}
+.ctrl button[aria-pressed="true"]{background:var(--accent); color:var(--surface); border-color:var(--accent);}
+.ctrl button:focus-visible{outline:2px solid var(--accent); outline-offset:2px;}
+
+/* ---------- grap ---------- */
+.stages{display:grid; gap:1px; background:var(--line); border:1px solid var(--line); margin:24px 0;}
+.stages > div{background:var(--surface); padding:14px 16px; display:grid; grid-template-columns:8px 1fr auto; gap:14px; align-items:center;}
+.stages .sw{width:8px; height:100%; min-height:34px;}
+.stages b{font-family:Archivo,sans-serif; font-size:15px; font-weight:600; display:block;}
+.stages small{color:var(--muted); font-size:13px;}
+.stages .rec{font-family:"IBM Plex Mono",monospace; font-size:13px; text-align:right; font-variant-numeric:tabular-nums;}
+.stages .rec i{display:block; font-style:normal; font-size:10.5px; letter-spacing:.1em; text-transform:uppercase; color:var(--muted);}
+
+
+/* ---------- ui panels ---------- */
+.ui{display:grid; grid-template-columns:repeat(2,1fr); gap:16px; margin:28px 0;}
+@media(max-width:820px){.ui{grid-template-columns:1fr;}}
+.panel{background:var(--surface); border:1px solid var(--line); padding:18px 20px;}
+.panel h4{
+  margin:0 0 14px; font-family:"IBM Plex Mono",monospace; font-size:11px;
+  letter-spacing:.13em; text-transform:uppercase; color:var(--muted);
+}
+.panel .foot{margin:14px 0 0; font-size:13px; line-height:1.5; color:var(--muted);}
+.panel .foot code{font-size:12px; background:var(--sunk); padding:1px 4px;}
+.uit{width:100%; border-collapse:collapse; font-size:14px;}
+.uit th{background:transparent; padding:0 0 7px; font-size:10px;}
+.uit td{padding:8px 0; border-bottom:1px solid var(--hair); white-space:nowrap;}
+.uit tr:last-child td{border-bottom:0;}
+.uit td.num,.uit th.num{text-align:right; font-family:"IBM Plex Mono",monospace; font-variant-numeric:tabular-nums;}
+.uit .muted{font-size:12.5px;}
+
+.prob,.drv{display:grid; grid-template-columns:112px 1fr 48px; gap:11px; align-items:center; margin-bottom:11px;}
+.drv{grid-template-columns:150px 1fr 40px;}
+.drv > span:first-child{font-size:13px; color:var(--ink);}
+.pill{
+  font-family:"IBM Plex Mono",monospace; font-size:10px; letter-spacing:.05em;
+  padding:3px 7px; color:var(--pill-ink); text-align:center; border-radius:2px; font-weight:600;
+}
+.track{height:8px; background:var(--sunk); border:1px solid var(--hair); position:relative;}
+.track > div{height:100%;}
+.track.c > div{position:absolute; top:0; height:100%;}
+.track.c .pos{left:50%; background:var(--s3);}
+.track.c .neg{right:50%; background:var(--accent);}
+.track.c::before{content:""; position:absolute; left:50%; top:-3px; bottom:-3px; width:1px; background:var(--line);}
+.pc{
+  font-family:"IBM Plex Mono",monospace; font-size:12.5px; text-align:right;
+  font-variant-numeric:tabular-nums; color:var(--muted);
+}
+
+footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--surface); color:var(--muted); font-size:14.5px;}
+@media(prefers-reduced-motion:no-preference){
+  .draw{stroke-dasharray:1400; stroke-dashoffset:1400; animation:dash 1.5s .25s ease-out forwards;}
+  @keyframes dash{to{stroke-dashoffset:0;}}
+}
+</style>
+</head>
+<body>
+<div class="mast">
+  <div class="wrap mastgrid">
+    <div>
+      <div class="eyebrow">
+        <span>SIH 2026 · SIH26082</span><span>Ministry of Earth Sciences</span><span>Disaster Management</span>
+      </div>
+      <h1>Airshed</h1>
+      <p class="thesis">
+        Delhi already has a physics forecast. It is wrong in a
+        <em>learnable</em> way. So we correct it instead of rebuilding it.
+      </p>
+    </div>
+    <dl class="keyfacts">
+      <div><dt>Forecast horizon</dt><dd>72 h<small>at 24 / 48 / 72</small></dd></div>
+      <div><dt>Ground stations</dt><dd>77<small>+24 upwind corridor</small></dd></div>
+      <div><dt>Beats raw CAMS by</dt><dd>29.6%<small>RMSE, 5 of 5 folds</small></dd></div>
+      <div><dt>Beats persistence by</dt><dd>20.5%<small>RMSE, 5 of 5 folds</small></dd></div>
+    </dl>
+  </div>
+</div>
+
+<div class="wrap">
+
+<section>
+  <div class="col">
+    <p class="kicker">The problem</p>
+    <h2>Forecasting a number is not the same as making a decision</h2>
+    <p class="lead">
+      Delhi's winter air kills. The government's response is <b>GRAP</b> — the Graded Response
+      Action Plan — which closes schools, halts construction and restricts vehicles in four
+      escalating stages. Those measures take days to bite. A forecast that arrives the morning
+      the air turns severe is a forecast that arrived too late.
+    </p>
+    <p>
+      The problem statement asks for a 72-hour forecast that treats pollution and weather as one
+      coupled system. Two things make that hard, and they compound.
+    </p>
+    <p>
+      <b>Pollution is mostly weather.</b> The same emissions produce a clear day or a catastrophe
+      depending on how deep the air mixes and which way the wind blows. A shallow winter inversion
+      traps a city's exhaust in a few hundred metres of air.
+    </p>
+    <p>
+      <b>The relationship runs both ways.</b> Aerosol seeds fog. Delhi's worst mornings are
+      pollution and low visibility together, closing runways at IGI and causing pile-ups on the
+      NH-44. A model that only pushes weather into pollution has modelled half the system.
+    </p>
+    <div class="pull">
+      The output that matters is not “PM2.5 will be 340”. It is “there is a 61% chance Stage III
+      is met in 72 hours, driven by upwind fires and a shallow inversion”.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">The decision everything rests on</p>
+    <h2>Consume the physics. Don't reimplement it.</h2>
+    <p>
+      The obvious build is a model trained on Delhi's station history. It is also the one that
+      fails, and it fails structurally rather than through bad luck: such a model is
+      <b>autoregressive</b>. It learns how pollution <i>has</i> behaved, not what the atmosphere is
+      going to <i>do</i>. Skill collapses past about 24 hours — exactly where a 72-hour forecast
+      has to work.
+    </p>
+    <p>
+      <b>CAMS</b>, the Copernicus Atmosphere Monitoring Service, publishes a global PM2.5 forecast
+      days ahead, free and keyless. It is coarse — roughly 40 km cells, so all of NCR resolves to
+      21 of them — and it is biased low over India, because global emission inventories represent
+      India poorly. For 1–3 November 2024 it forecast a mean of <b>78.7 µg/m³</b> while Delhi
+      observed several hundred.
+    </p>
+    <p>
+      That combination is not a defect. It is the opportunity. CAMS supplies the
+      <b>future</b> — winds, transport, regional build-up. We supply the <b>local</b> — the bias
+      correction and the sub-grid detail. And because CAMS is an external, published,
+      internationally used forecast, beating it by a measured margin is a result rather than
+      a claim.
+    </p>
+
+    <figure class="fig">
+      <svg viewBox="0 0 720 250" role="img" aria-label="Diagram: a coarse CAMS grid cell plus local ground truth feeding a correction layer that outputs a fine forecast surface">
+        <defs>
+          <pattern id="grid40" width="60" height="60" patternUnits="userSpaceOnUse">
+            <path d="M60 0H0v60" fill="none" stroke="var(--line)" stroke-width="1"/>
+          </pattern>
+        </defs>
+        <rect x="8" y="34" width="180" height="180" fill="url(#grid40)" stroke="var(--line)"/>
+        <text x="8" y="24" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="11">CAMS · ~40 km cells</text>
+        <text x="8" y="230" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="10.5">knows the future, not the place</text>
+        <rect x="8" y="34" width="60" height="60" fill="var(--s2)" opacity=".18"/>
+        <rect x="68" y="94" width="60" height="60" fill="var(--s2)" opacity=".3"/>
+
+        <path d="M196 124h56" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+        <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+          <path d="M0 0l8 4-8 4z" fill="var(--muted)"/></marker></defs>
+
+        <rect x="258" y="70" width="150" height="108" fill="var(--accent-soft)" stroke="var(--accent)"/>
+        <text x="333" y="112" text-anchor="middle" fill="var(--ink)" font-family="Archivo, sans-serif" font-size="15" font-weight="600">Correction</text>
+        <text x="333" y="131" text-anchor="middle" fill="var(--ink)" font-family="Archivo, sans-serif" font-size="15" font-weight="600">layer</text>
+        <text x="333" y="152" text-anchor="middle" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="10.5">LightGBM · quantiles</text>
+
+        <text x="258" y="212" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="10.5">77 CPCB stations</text>
+        <text x="258" y="228" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="10.5">meteorology · fires · METAR</text>
+        <path d="M333 200v-18" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+
+        <path d="M416 124h56" stroke="var(--muted)" stroke-width="1.5" fill="none" marker-end="url(#a)"/>
+        <rect x="480" y="34" width="180" height="180" fill="none" stroke="var(--line)"/>
+        <g opacity=".85">
+          <rect x="480" y="34" width="36" height="36" fill="var(--s1)" opacity=".55"/>
+          <rect x="516" y="34" width="36" height="36" fill="var(--s2)" opacity=".5"/>
+          <rect x="552" y="70" width="36" height="36" fill="var(--s3)" opacity=".55"/>
+          <rect x="588" y="70" width="36" height="36" fill="var(--s2)" opacity=".45"/>
+          <rect x="516" y="106" width="36" height="36" fill="var(--s3)" opacity=".7"/>
+          <rect x="480" y="142" width="36" height="36" fill="var(--s1)" opacity=".4"/>
+          <rect x="624" y="142" width="36" height="36" fill="var(--s2)" opacity=".35"/>
+        </g>
+        <text x="480" y="24" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="11">Our surface · 0.05°</text>
+        <text x="480" y="230" fill="var(--muted)" font-family="IBM Plex Mono, monospace" font-size="10.5">+ prediction intervals, + GRAP probability</text>
+      </svg>
+      <figcaption>
+        <b>THE ARCHITECTURE IN ONE PICTURE.</b> The physics model supplies transport and regional
+        build-up at 40 km. Ground truth, forecast meteorology, fire detections and airport
+        visibility supply the local signal. The correction layer learns the residual between them.
+      </figcaption>
+    </figure>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">Where the data comes from</p>
+    <h2>Seven sources, all free, all cached</h2>
+    <p>
+      Nothing in the demo path touches a live API. Every source writes to our own Parquet store on
+      a schedule; the interface reads the cache and shows how stale it is. A CPCB outage degrades
+      the demo, it does not kill it.
+    </p>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Source</th><th>What it gives us</th><th>Why it is there</th><th class="num">Coverage</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td><b>CAMS</b> via Open-Meteo</td><td class="wrap-ok">PM2.5, PM10, CO, NO₂, SO₂, O₃, dust, AOD — forecast</td><td class="wrap-ok">The spine. Supplies the future.</td><td class="num">739 d</td></tr>
+        <tr><td><b>CPCB</b> via OpenAQ</td><td class="wrap-ok">Ground-truth PM2.5, hourly, per station</td><td class="wrap-ok">The target we correct toward</td><td class="num">77 stn</td></tr>
+        <tr><td><b>GFS</b> via Open-Meteo</td><td class="wrap-ok">Wind, temperature, humidity, boundary-layer height, CAPE, 925/850 hPa</td><td class="wrap-ok">Whether today's emissions stay in the city</td><td class="num">709 d</td></tr>
+        <tr><td><b>Previous Runs</b> API</td><td class="wrap-ok">The same meteorology at true forecast lead</td><td class="wrap-ok">So training and serving see the same thing</td><td class="num">553 d</td></tr>
+        <tr><td><b>METAR</b> (VIDP)</td><td class="wrap-ok">Measured visibility at IGI Airport</td><td class="wrap-ok">Independent proof of the fog coupling</td><td class="num">739 d</td></tr>
+        <tr><td><b>NASA FIRMS</b></td><td class="wrap-ok">VIIRS / MODIS active fire detections</td><td class="wrap-ok">Punjab–Haryana stubble burning</td><td class="num">23,544</td></tr>
+        <tr><td><b>CAQM</b></td><td class="wrap-ok">Statutory GRAP stage thresholds</td><td class="wrap-ok">Hardcoded from the official schedule</td><td class="num">4 stages</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p class="muted" style="font-size:15px">
+      A second network of <b>24 monitors, 65–340 km up the Punjab corridor</b>, is held in a
+      separate store so an upwind station can never leak into the city average or into a forecast
+      target.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">End to end</p>
+    <h2>How a forecast is actually made</h2>
+    <p>
+      Six stages, and the order is the point: each one is only allowed to start once the previous
+      one has answered a yes-or-no question with a number attached.
+    </p>
+  </div>
+  <div class="pipe">
+    <div><div class="n">1</div><div>
+      <h4>Ingest</h4>
+      <p>One module per source, all with the same shape: <code>fetch(start, end) → DataFrame</code>,
+      written as Parquet partitioned by date, idempotent so a re-run overwrites cleanly. Station
+      gaps are recorded as missing, never interpolated.</p>
+    </div></div>
+    <div><div class="n">2</div><div>
+      <h4>Align</h4>
+      <p>Every source is joined onto one complete hourly UTC index per station — built
+      <i>before</i> any lag is taken, so <code>shift(24)</code> means 24 hours and not 24 surviving
+      rows. This is where misalignment bugs hide, so it is the most heavily tested code we have.</p>
+    </div></div>
+    <div><div class="n">3</div><div>
+      <h4>Supervise</h4>
+      <p>One row per <code>(station, issue_time, horizon)</code>. Observations are read at or
+      before issue time; forecasts are read at target time, because a forecast for t+72 genuinely
+      is in hand at t. That asymmetry is the whole design — inverting it is leakage.</p>
+    </div></div>
+    <div><div class="n">4</div><div>
+      <h4>Correct</h4>
+      <p>LightGBM learns the residual between CAMS and observation. One model per
+      (horizon × quantile) — nine small models — so a 72-hour forecast is predicted directly
+      rather than by feeding predictions back in and compounding error.</p>
+    </div></div>
+    <div><div class="n">5</div><div>
+      <h4>Decide</h4>
+      <p>The predicted distribution is converted into a probability for each GRAP stage, and the
+      city series is modelled directly rather than aggregated from 77 correlated station
+      forecasts after the fact.</p>
+    </div></div>
+    <div><div class="n">6</div><div>
+      <h4>Serve</h4>
+      <p>FastAPI over the cache. A MapLibre dashboard shows the surface, the stage probabilities,
+      the intervals, the driver attribution, and a “last synced” age that turns red when the data
+      goes stale.</p>
+    </div></div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">System architecture</p>
+    <h2>Every box, and what is not allowed to touch what</h2>
+    <p>
+      Four layers, one direction of flow. The rule that shapes the whole diagram is that
+      <b>nothing downstream of the store is allowed to make a network call</b> — the models, the
+      evaluation harness, the API and the interface all read cached Parquet. That is what makes
+      the demo survive a CPCB outage, and it is what makes a past week reproducible on demand.
+    </p>
+  </div>
+
+  <div class="scroll" style="padding:22px; background:var(--surface)">
+  <svg viewBox="0 0 1000 620" style="min-width:940px; display:block; width:100%; height:auto"
+       role="img" aria-label="System architecture: external sources feed ingest modules, which write a Parquet store; features, models, evaluation and the API read only from that store">
+    <defs>
+      <marker id="ar" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+        <path d="M0 0l9 4.5L0 9z" fill="var(--muted)"/>
+      </marker>
+      <marker id="arA" markerWidth="9" markerHeight="9" refX="8" refY="4.5" orient="auto">
+        <path d="M0 0l9 4.5L0 9z" fill="var(--accent)"/>
+      </marker>
+    </defs>
+
+    <!-- band labels -->
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--muted)" letter-spacing="1.4">
+      <text x="8" y="30">EXTERNAL</text>
+      <text x="8" y="146">INGEST</text>
+      <text x="8" y="266">STORE</text>
+      <text x="8" y="386">MODEL</text>
+      <text x="8" y="536">SERVE</text>
+    </g>
+    <g stroke="var(--hair)" stroke-width="1">
+      <line x1="0" y1="104" x2="1000" y2="104"/><line x1="0" y1="224" x2="1000" y2="224"/>
+      <line x1="0" y1="344" x2="1000" y2="344"/><line x1="0" y1="490" x2="1000" y2="490"/>
+    </g>
+
+    <!-- EXTERNAL -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11" fill="var(--ink)">
+      <g fill="var(--sunk)" stroke="var(--line)">
+        <rect x="112" y="14" width="120" height="34"/><rect x="244" y="14" width="120" height="34"/>
+        <rect x="376" y="14" width="120" height="34"/><rect x="508" y="14" width="120" height="34"/>
+        <rect x="640" y="14" width="120" height="34"/><rect x="772" y="14" width="106" height="34"/>
+        <rect x="890" y="14" width="100" height="34"/>
+      </g>
+      <text x="172" y="35" text-anchor="middle">CAMS</text>
+      <text x="304" y="35" text-anchor="middle">GFS met</text>
+      <text x="436" y="35" text-anchor="middle">Previous Runs</text>
+      <text x="568" y="35" text-anchor="middle">CPCB/OpenAQ</text>
+      <text x="700" y="35" text-anchor="middle">METAR VIDP</text>
+      <text x="825" y="35" text-anchor="middle">FIRMS</text>
+      <text x="940" y="35" text-anchor="middle">CAQM</text>
+      <text x="112" y="66" fill="var(--muted)" font-size="10">forecast PM2.5, 8 species</text>
+      <text x="508" y="66" fill="var(--muted)" font-size="10">ground truth, 77 stations + 24 upwind</text>
+      <text x="772" y="66" fill="var(--muted)" font-size="10">fires · thresholds</text>
+    </g>
+    <g stroke="var(--muted)" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+      <path d="M172 78v34"/><path d="M304 78v34"/><path d="M436 78v34"/>
+      <path d="M568 78v34"/><path d="M700 78v34"/><path d="M825 78v34"/><path d="M940 78v34"/>
+    </g>
+
+    <!-- INGEST -->
+    <g font-family="IBM Plex Mono, monospace" font-size="11">
+      <g fill="var(--surface)" stroke="var(--accent)">
+        <rect x="112" y="114" width="120" height="34"/><rect x="244" y="114" width="120" height="34"/>
+        <rect x="376" y="114" width="120" height="34"/><rect x="508" y="114" width="120" height="34"/>
+        <rect x="640" y="114" width="120" height="34"/><rect x="772" y="114" width="106" height="34"/>
+        <rect x="890" y="114" width="100" height="34"/>
+      </g>
+      <g fill="var(--ink)">
+        <text x="172" y="135" text-anchor="middle">cams.py</text>
+        <text x="304" y="135" text-anchor="middle">meteo.py</text>
+        <text x="436" y="135" text-anchor="middle">meteo.py</text>
+        <text x="568" y="135" text-anchor="middle">cpcb.py</text>
+        <text x="700" y="135" text-anchor="middle">metar.py</text>
+        <text x="825" y="135" text-anchor="middle">fires.py</text>
+        <text x="940" y="135" text-anchor="middle">grap.py</text>
+      </g>
+      <text x="112" y="168" fill="var(--muted)" font-size="10">every module: fetch(start, end) → DataFrame, idempotent, partitioned by date</text>
+    </g>
+    <g stroke="var(--muted)" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+      <path d="M172 178v32"/><path d="M304 178v32"/><path d="M436 178v32"/>
+      <path d="M568 178v32"/><path d="M700 178v32"/><path d="M825 178v32"/>
+    </g>
+
+    <!-- STORE -->
+    <rect x="112" y="234" width="878" height="60" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="132" y="258" font-family="Archivo, sans-serif" font-size="15" font-weight="600" fill="var(--ink)">Parquet store + DuckDB</text>
+    <text x="132" y="279" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--muted)">cams_archive · cams_runs · meteo_archive · meteo_leadmatched · meteo_runs · cpcb · cpcb_upwind · metar · fires</text>
+    <g font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--accent)">
+      <text x="990" y="258" text-anchor="end">no server</text>
+      <text x="990" y="279" text-anchor="end">~9M rows</text>
+    </g>
+
+    <!-- daily job -->
+    <rect x="112" y="306" width="230" height="28" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="126" y="325" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--muted)">daily_archive.py --loop · every 30 min</text>
+    <path d="M227 306v-10" stroke="var(--accent)" stroke-width="1.2" fill="none" marker-end="url(#arA)"/>
+
+    <text x="360" y="325" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--s3)">archived runs cannot be backfilled — this job is the only source of them</text>
+
+    <!-- STORE -> MODEL -->
+    <path d="M551 294v60" stroke="var(--accent)" stroke-width="1.5" fill="none" marker-end="url(#arA)"/>
+
+    <!-- MODEL -->
+    <rect x="112" y="360" width="200" height="52" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="126" y="380" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">features/build</text>
+    <text x="126" y="399" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">one hourly UTC index, then lags</text>
+
+    <rect x="330" y="360" width="200" height="52" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="344" y="380" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">baselines</text>
+    <text x="344" y="399" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">persistence · raw CAMS</text>
+
+    <rect x="548" y="360" width="200" height="52" fill="var(--surface)" stroke="var(--accent)" stroke-width="1.5"/>
+    <text x="562" y="380" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">corrector</text>
+    <text x="562" y="399" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">LightGBM · 3 horizons × 3 quantiles</text>
+
+    <rect x="766" y="360" width="224" height="52" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="780" y="380" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">graph · surface · calibrate</text>
+    <text x="780" y="399" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">wind-aware kernel · conformal</text>
+
+    <g stroke="var(--muted)" stroke-width="1.2" fill="none" marker-end="url(#ar)">
+      <path d="M312 386h14"/><path d="M530 386h14"/><path d="M748 386h14"/>
+    </g>
+
+    <!-- eval -->
+    <rect x="330" y="428" width="418" height="46" fill="var(--surface)" stroke="var(--line)" stroke-dasharray="4 3"/>
+    <text x="344" y="447" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">eval — ablation · rolling · leadmatch · camsoffset · loso · grap</text>
+    <text x="344" y="465" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">writes versioned markdown tables; a claim without a baseline beside it does not ship</text>
+    <path d="M648 412v14" stroke="var(--muted)" stroke-width="1.2" fill="none" marker-end="url(#ar)"/>
+
+    <!-- SERVE -->
+    <path d="M648 474v32" stroke="var(--accent)" stroke-width="1.5" fill="none" marker-end="url(#arA)"/>
+    <rect x="330" y="506" width="200" height="46" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="344" y="525" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">FastAPI</text>
+    <text x="344" y="543" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">/forecast /replay /surface /status</text>
+
+    <rect x="548" y="506" width="200" height="46" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="562" y="525" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">MapLibre dashboard</text>
+    <text x="562" y="543" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">surface · GRAP · drivers · staleness</text>
+    <path d="M530 529h14" stroke="var(--muted)" stroke-width="1.2" fill="none" marker-end="url(#ar)"/>
+
+    <rect x="766" y="506" width="224" height="46" fill="var(--surface)" stroke="var(--line)"/>
+    <text x="780" y="525" font-family="Archivo, sans-serif" font-size="13" font-weight="600" fill="var(--ink)">attribution</text>
+    <text x="780" y="543" font-family="IBM Plex Mono, monospace" font-size="10" fill="var(--muted)">exact tree SHAP → human causes</text>
+    <path d="M748 529h14" stroke="var(--muted)" stroke-width="1.2" fill="none" marker-end="url(#ar)"/>
+
+    <text x="112" y="580" font-family="IBM Plex Mono, monospace" font-size="10.5" fill="var(--muted)">Below the store line, nothing opens a socket. The interface reads the cache and shows its age.</text>
+  </svg>
+  </div>
+
+  <div class="col">
+    <p class="muted" style="font-size:15px">
+      The dashed box matters more than it looks. The evaluation harness is not a reporting
+      afterthought — it is the gate each phase had to pass before the next one was allowed to
+      start, which is why the baseline and the ablation existed before the dashboard did.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">The model</p>
+    <h2>Inputs, process, outputs</h2>
+  </div>
+  <div class="io">
+    <div>
+      <h4>Inputs</h4>
+      <ul>
+        <li><b>CAMS at target hour</b> — 8 species including AOD and dust</li>
+        <li><b>Observation history</b> — lags at 1, 2, 3, 6, 12, 24, 48, 72 h; rolling means over 3, 24, 72 h; a 24 h change term</li>
+        <li><b>Forecast meteorology</b> — 27 fields: wind at 10 m and 100 m as speed, direction and u/v components; boundary-layer height; a ventilation index; lapse rates and an inversion flag</li>
+        <li><b>Fires</b> — VIIRS/MODIS counts and radiative power over Punjab–Haryana, last 24 and 72 h</li>
+        <li><b>Upwind corridor</b> — wind-aligned concentration, travel time, advected value now arriving</li>
+        <li><b>Visibility</b> — measured at VIDP</li>
+        <li><b>Calendar</b> — hour and day-of-year as sine/cosine pairs, so midnight is adjacent to 23:00</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Process</h4>
+      <ul>
+        <li><b>Target:</b> the residual — observed minus CAMS — not the concentration itself</li>
+        <li><b>Nine heads:</b> 3 horizons × 3 quantiles (10th, 50th, 90th), each a separate LightGBM fit with a quantile objective</li>
+        <li><b>Direct multi-horizon.</b> No recursive rollout anywhere in the codebase</li>
+        <li><b>Conformal calibration</b> on a split the model never trained on, widening intervals by one number per horizon</li>
+        <li><b>Graph layer</b> for space: a wind-aware kernel where a northerly makes the northern neighbour count more</li>
+        <li><b>Exact tree SHAP</b> grouped into human causes for attribution</li>
+      </ul>
+    </div>
+    <div>
+      <h4>Outputs</h4>
+      <ul>
+        <li><b>PM2.5 at 24 / 48 / 72 h</b> per station, as a 10th–50th–90th percentile band, never a bare point estimate</li>
+        <li><b>A downscaled surface</b> on a 0.05° grid, every cell carrying its distance to the nearest real monitor</li>
+        <li><b>GRAP stage probabilities</b> — P(stage ≥ I…IV) with lead time</li>
+        <li><b>Driver attribution</b> — “upwind fires + shallow inversion”, grouped from SHAP</li>
+        <li><b>Visibility and fog-risk</b>, as P(visibility &lt; 1 km)</li>
+      </ul>
+    </div>
+  </div>
+  <div class="col">
+    <p>
+      One detail carries more weight than it looks. <b>Every model returns quantiles, not a
+      number.</b> A point forecast of 240 µg/m³ cannot tell a policymaker whether Stage III is in
+      play; a distribution can, and thresholding a distribution is what turns a forecast into a
+      decision.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">The system running</p>
+    <h2>What it actually shows you</h2>
+    <p>
+      Below is a real response from the live endpoint — the run issued
+      <b>2026-08-24 09:00 UTC</b>, six hours old at the time of capture, built from 77 stations
+      and read entirely from cache. Late August is monsoon, so Delhi is clean and every stage
+      probability is close to zero. That is the boring case, and a system you can only judge
+      during an episode is a system you cannot trust in June.
+    </p>
+  </div>
+
+  <div class="ui">
+    <div class="panel">
+      <h4>Live forecast — next 72 hours</h4>
+      <table class="uit">
+        <thead><tr><th>Lead</th><th class="num">City PM2.5 (10–90%)</th><th class="num">P(≥ III)</th><th>GRAP</th></tr></thead>
+        <tbody>
+          <tr><td><b>+24 h</b></td><td class="num"><b>51.5</b> <span class="muted">22–80</span></td><td class="num">0%</td><td class="muted">below Stage I</td></tr>
+          <tr><td><b>+48 h</b></td><td class="num"><b>56.6</b> <span class="muted">30–76</span></td><td class="num">0%</td><td class="muted">below Stage I</td></tr>
+          <tr><td><b>+72 h</b></td><td class="num"><b>50.0</b> <span class="muted">26–70</span></td><td class="num">0%</td><td class="muted">below Stage I</td></tr>
+        </tbody>
+      </table>
+      <p class="foot">
+        Every row is a band, never a bare number. The band is what the GRAP layer thresholds.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h4>GRAP stage probability</h4>
+      <div class="prob"><span class="pill" style="background:var(--s1)">I Poor</span><div class="track"><div style="width:6.9%;background:var(--s1)"></div></div><span class="pc">6.9%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s2)">II Very Poor</span><div class="track"><div style="width:2.4%;background:var(--s2)"></div></div><span class="pc">2.4%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s3)">III Severe</span><div class="track"><div style="width:0.6%;background:var(--s3)"></div></div><span class="pc">0.0%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s4)">IV Severe+</span><div class="track"><div style="width:0.6%;background:var(--s4)"></div></div><span class="pc">0.0%</span></div>
+      <p class="foot">
+        A probability per stage at each horizon — the decision, not the concentration.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h4>Why — driver attribution</h4>
+      <div class="drv"><span>regional forecast (CAMS)</span><div class="track c"><div class="pos" style="width:44%"></div></div><span class="pc">+1.2</span></div>
+      <div class="drv"><span>recent local levels</span><div class="track c"><div class="neg" style="width:50%"></div></div><span class="pc">−1.4</span></div>
+      <div class="drv"><span>other weather</span><div class="track c"><div class="neg" style="width:8%"></div></div><span class="pc">−0.2</span></div>
+      <div class="drv"><span>humidity and fog</span><div class="track c"><div class="neg" style="width:4%"></div></div><span class="pc">−0.1</span></div>
+      <div class="drv"><span>time of day and season</span><div class="track c"><div class="neg" style="width:1%"></div></div><span class="pc">0.0</span></div>
+      <p class="foot">
+        Drivers explain our <i>correction to CAMS</i>, not the pollution itself. Here CAMS is
+        pushing the forecast up and recent observations are pulling it back down.
+      </p>
+    </div>
+
+    <div class="panel">
+      <h4>Cache status</h4>
+      <table class="uit">
+        <thead><tr><th>Dataset</th><th class="num">Days</th><th class="num">Latest</th></tr></thead>
+        <tbody>
+          <tr><td>cpcb</td><td class="num">2,551</td><td class="num">2026-08-24</td></tr>
+          <tr><td>cams_archive</td><td class="num">739</td><td class="num">2026-08-24</td></tr>
+          <tr><td>meteo_archive</td><td class="num">709</td><td class="num">2026-08-24</td></tr>
+          <tr><td>metar</td><td class="num">739</td><td class="num">2026-08-24</td></tr>
+          <tr><td>cams_runs</td><td class="num">2</td><td class="num">2026-08-24</td></tr>
+          <tr><td>meteo_runs</td><td class="num">2</td><td class="num">2026-08-24</td></tr>
+        </tbody>
+      </table>
+      <p class="foot">
+        Staleness is a first-class number, not a detail. The two <code>_runs</code> stores read 2
+        because we only began archiving live forecast runs this week — and they can never be
+        backfilled.
+      </p>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      The interface also carries a caveat we could have hidden. The forecast response includes an
+      <code>input_gap</code> field reporting that the model is trained on archived CAMS and served
+      live CAMS, and that the served input currently runs about <b>21 µg/m³ low</b> at lead day 1
+      on the two run-days we have measured. Too few to correct for — so the dashboard says the
+      forecast is uncorrected rather than silently applying a bias fitted on a fortnight of
+      monsoon air.
+    </p>
+    <div class="note">
+      <b>Replay is the demo centrepiece, and it doubles as validation.</b> Pick any past date and
+      the system rebuilds what it <i>would</i> have forecast from cache alone, then scores it
+      against what CPCB actually recorded. On the 24-hour replay shown in testing: 469
+      station-hours, model RMSE <b>30.5 µg/m³</b> against raw CAMS at <b>41.3</b>.
+    </div>
+  </div>
+</section>
+
+
+<section>
+  <div class="col">
+    <p class="kicker">Results</p>
+    <h2>Every claim has a baseline next to it</h2>
+    <p>
+      Two baselines appear in every table. <b>Persistence</b> — “tomorrow is like today” — is
+      brutally strong for air quality and published models routinely fail to beat it.
+      <b>Raw CAMS</b> is the physics forecast we claim to improve. A result that does not clear
+      both is a negative result and is reported as one.
+    </p>
+  </div>
+
+  <figure class="fig">
+    <div class="ctrl">
+      <button type="button" data-h="24" aria-pressed="false">24 h</button>
+      <button type="button" data-h="48" aria-pressed="false">48 h</button>
+      <button type="button" data-h="72" aria-pressed="true">72 h</button>
+    </div>
+    <svg viewBox="0 0 720 258" role="img" aria-label="Bar chart of RMSE by model at the selected horizon">
+      <g id="bars"></g>
+    </svg>
+    <figcaption>
+      <b>RMSE, µg/m³, LOWER IS BETTER.</b> Held-out test split. Persistence degrades with lead
+      time, as a real baseline should. Note that raw CAMS barely does — that is the fingerprint of
+      an archive built at short lead, and it is why we measured the cost of that separately.
+    </figcaption>
+  </figure>
+
+  <div class="col">
+    <h3>The headline, with error bars</h3>
+    <p>
+      A single split is not evidence for effects of a few percent, so every contested claim is
+      re-run over five expanding-window folds, each holding out a whole season. Both models see
+      the same fold, so seasonal variation cancels.
+    </p>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Claim</th><th class="num">Folds better</th><th class="num">Mean gain</th><th class="num">Spread</th><th>Verdict</th></tr></thead>
+      <tbody>
+        <tr class="hi"><td>Correction vs persistence</td><td class="num">5 / 5</td><td class="num">+20.5%</td><td class="num">±7.1</td><td><span class="tag ok">Holds up</span></td></tr>
+        <tr class="hi"><td>Correction vs raw CAMS</td><td class="num">5 / 5</td><td class="num">+29.6%</td><td class="num">±17.3</td><td><span class="tag ok">Holds up</span></td></tr>
+        <tr><td>Upwind fires</td><td class="num">3 / 5</td><td class="num">+1.3%</td><td class="num">±1.9</td><td><span class="tag">Cannot tell</span></td></tr>
+        <tr><td>Upwind corridor</td><td class="num">2 / 5</td><td class="num">+0.0%</td><td class="num">±0.5</td><td><span class="tag">Cannot tell</span></td></tr>
+        <tr><td>Coupled multi-output</td><td class="num">2 / 5</td><td class="num">−0.0%</td><td class="num">±0.4</td><td><span class="tag no">Does not hold</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <h3>The coupling, proved in the hard direction</h3>
+    <p>
+      Weather-to-pollution is in every air-quality model. The direction the problem statement
+      actually asks about is the other one: does knowing the aerosol load improve a
+      <i>weather</i> forecast? We tested it on visibility, measured independently at the airport.
+    </p>
+    <p>
+      Raw GFS visibility is <b>21.3 km RMSE</b> — the physics model is effectively blind to haze.
+      Correcting it with weather alone gives <b>1.19 km</b>. Adding pollution gives
+      <b>1.08 km</b>, a <b>9.5%</b> improvement. And it passes the test that separates physics
+      from a bigger feature set: <b>the gain concentrates where the aerosol is</b> — +0.3% in
+      clean air, +8.9% in poor air. Fog-alarm recall rises from 84% to <b>91%</b>.
+    </p>
+
+    <h3>Space, and where it fails</h3>
+    <p>
+      Each station is deleted from the network and predicted from the others — no neighbours of
+      its own, no history of its own. Held-out error is <b>82.6 µg/m³</b>, against distance-weighted
+      interpolation at 109.6 and raw CAMS at 92.3.
+    </p>
+    <p>
+      But raw CAMS beats our graph at three of six held-out stations, and they are all the
+      clean peripheral sites — the graph pulls a low-concentration outer station toward the
+      dirtier city its neighbours describe. Against an observed mean of 167 µg/m³, an error of 83
+      is large. The surface is good enough to say which part of the city is worse this morning. It
+      is not good enough to quote a number for an unmonitored block, and the interface does not
+      pretend otherwise.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">The decision layer</p>
+    <h2>From a distribution to a policy call</h2>
+    <p>
+      GRAP is invoked on Delhi's city-wide average AQI, so we model that series directly. Stage
+      thresholds are transcribed from the official CAQM schedule. The declaration threshold falls
+      as severity rises, because the costs are asymmetric: missing a severe episode is far worse
+      than a false alarm, so Stage III is declared at a one-in-four chance while Stage I needs an
+      even one.
+    </p>
+  </div>
+  <div class="stages">
+    <div><div class="sw" style="background:var(--s1)"></div><div><b>Stage I · Poor</b><small>AQI 201–300 · declared at p ≥ 0.50</small></div><div class="rec">100%<i>recall @72 h</i></div></div>
+    <div><div class="sw" style="background:var(--s2)"></div><div><b>Stage II · Very Poor</b><small>AQI 301–400 · declared at p ≥ 0.40</small></div><div class="rec">98%<i>recall @72 h</i></div></div>
+    <div><div class="sw" style="background:var(--s3)"></div><div><b>Stage III · Severe</b><small>AQI 401–450 · declared at p ≥ 0.25</small></div><div class="rec">82%<i>recall @72 h</i></div></div>
+    <div><div class="sw" style="background:var(--s4)"></div><div><b>Stage IV · Severe Plus</b><small>AQI 451+ · declared at p ≥ 0.20</small></div><div class="rec">61%<i>recall @48 h</i></div></div>
+  </div>
+  <div class="col">
+    <div class="note">
+      <b>We report per-class recall, never overall accuracy.</b> Stage IV is rare — 18 event hours
+      in the test period. A model that predicted “not Stage IV” every single time would score
+      above 99% accuracy and be worthless. And with 18 events, the Stage IV number above is a
+      sample-size artefact, not a capability. We say so rather than headline it.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">What we got wrong</p>
+    <h2>The negative results are the credibility</h2>
+    <p>
+      Three of the ideas we were most confident about do not pay for themselves on one year of
+      data. All three are in the results tables under their own headings.
+    </p>
+    <ul>
+      <li><b>The upwind corridor does not yet help.</b> 24 monitors up the Punjab corridor, +0.0%
+        across folds. The transport signal is probably already implicit in the forecast wind
+        field, or timing needs a real trajectory model rather than distance ÷ wind speed.</li>
+      <li><b>The coupled multi-output model does not beat the single-output one.</b> The likely
+        reason is data, not architecture: observed visibility comes from one airport and is
+        broadcast to every station, so it carries one city-wide signal the meteorology already
+        supplies.</li>
+      <li><b>Fires help less than the physics says they should</b> — +1.3%, on 3 of 5 folds. But
+        their best fold by far is the stubble season itself, at +4.3%, which is exactly where the
+        mechanism predicts. One burning season cannot separate that from noise.</li>
+    </ul>
+    <p>
+      We were also wrong in a way that is worth admitting because we caught it ourselves.
+      An early single split reported coupling as a <i>clear negative</i>. Rolling-origin
+      evaluation overturned it. That is why nothing in this project is claimed from one split any
+      more.
+    </p>
+    <div class="pull">
+      For each of these the fix is more winters, not more features — and every gain is smaller
+      than its own fold-to-fold spread, so the honest verdict is “no measurable effect either
+      way”, not “it helps”.
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">How we keep ourselves honest</p>
+    <h2>Eight rules, each one written after something went wrong</h2>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Rule</th><th>What it prevents</th></tr></thead>
+      <tbody>
+        <tr><td><b>Never use reanalysis at inference</b></td><td class="wrap-ok">ERA5 lags real time by ~5 days. Training on it and serving forecasts is a distribution mismatch that inflates every score.</td></tr>
+        <tr><td><b>Persistence in every table</b></td><td class="wrap-ok">The baseline most air-quality papers quietly omit, because it is hard to beat.</td></tr>
+        <tr><td><b>Never random-split a time series</b></td><td class="wrap-ok">Adjacent hours leak the answer. We hold out whole episodes with a 96-hour embargo either side.</td></tr>
+        <tr><td><b>No recursive rollout</b></td><td class="wrap-ok">Feeding predictions back in compounds error across 72 hours. One head per horizon instead.</td></tr>
+        <tr><td><b>Per-class recall, never accuracy</b></td><td class="wrap-ok">Rare severe classes make overall accuracy meaningless.</td></tr>
+        <tr><td><b>Gaps are missing, not interpolable</b></td><td class="wrap-ok">CPCB stations go offline and swap instruments. Bridging a gap invents data.</td></tr>
+        <tr><td><b>Never claim CAMS's resolution as ours</b></td><td class="wrap-ok">Neighbourhood detail must come from our downscaling and be proved by leave-one-station-out.</td></tr>
+        <tr><td><b>Cache everything; never live-query in the demo</b></td><td class="wrap-ok">An upstream outage must degrade the demo, not kill it.</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>
+      Some of these came from real failures. Matching stations by distance alone once selected a
+      registration that stopped reporting in 2021 — and empty ground truth looks exactly like a
+      routine outage. Sorting quantiles once moved the baseline's median, turning “raw CAMS” into
+      a bias-corrected CAMS and flattering the very thing we have to beat.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">Status</p>
+    <h2>Built, and what is still open</h2>
+    <div class="note">
+      <b>Numbers on this page were computed on a 51-station network.</b> We expanded to 77 in
+      August 2026 and the results are being regenerated. The station set changed, so they will
+      move for reasons that have nothing to do with the model — we would rather say that than
+      quietly republish.
+    </div>
+  </div>
+  <div class="scroll">
+    <table>
+      <thead><tr><th>Component</th><th>State</th><th>Evidence</th></tr></thead>
+      <tbody>
+        <tr><td>Data spine, 7 sources</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Rebuilds any past week from cache with sockets blocked</td></tr>
+        <tr><td>Correction layer + ablation</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Beats both baselines at all three horizons</td></tr>
+        <tr><td>Uncertainty calibration</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">80.0% coverage against an 80% target</td></tr>
+        <tr><td>GRAP decision layer</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Stage III at 72 h median lead</td></tr>
+        <tr><td>Spatial downscaling</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">82.6 µg/m³ leave-one-station-out</td></tr>
+        <tr><td>Dashboard + replay</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">MapLibre, intervals everywhere, staleness visible</td></tr>
+        <tr><td>Network expansion to 77</td><td><span class="tag wait">Regenerating</span></td><td class="wrap-ok">Data landed; results being recomputed</td></tr>
+        <tr><td>Second winter of ground truth</td><td><span class="tag wait">Nov 2026</span></td><td class="wrap-ok">The constraint behind every “cannot tell”</td></tr>
+        <tr><td>Hyperparameter search</td><td><span class="tag wait">Not started</span></td><td class="wrap-ok">Defaults throughout — free accuracy on the table</td></tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="col">
+    <p>
+      Explicitly out of scope, and staying there: running our own chemical transport model — a
+      multi-month HPC undertaking, and the ministry already has one; hospital admission
+      correlation, which is not public at usable granularity; and low-cost sensor fusion, unless
+      we actually obtain network access.
+    </p>
+  </div>
+</section>
+
+<section>
+  <div class="col">
+    <p class="kicker">The question we will be asked</p>
+    <h2>“The ministry already funds SAFAR and a Decision Support System. Why you?”</h2>
+    <div class="pull">
+      We don't replace the physics model — we correct it. Here is the bias in the operational
+      forecast, here is our correction, here is the RMSE reduction with error bars across five
+      seasons, and the same method applies to your model as easily as it does to CAMS.
+    </div>
+    <p>
+      That answer only exists because the baseline and the ablation were built <i>before</i> the
+      dashboard. It is also why the negative results stay on the page: a team that reports three
+      things that did not work is a team you can believe about the two that did.
+    </p>
+  </div>
+</section>
+
+</div>
+
+<footer>
+  <div class="wrap col">
+    Airshed · Smart India Hackathon 2026 · Problem statement SIH26082 · Ministry of Earth Sciences.
+    Built in Python with LightGBM, Polars, DuckDB, FastAPI and MapLibre. Every data source is free
+    and every result on this page is reproducible from one command in the repository.
+  </div>
+</footer>
+
+<script>
+const DATA = {
+  24: [["persistence",84.7],["raw CAMS",95.2],["CAMS + history",63.7],["full model",62.6]],
+  48: [["persistence",93.9],["raw CAMS",93.4],["CAMS + history",65.2],["full model",62.9]],
+  72: [["persistence",96.1],["raw CAMS",93.1],["CAMS + history",64.6],["full model",63.8]]
+};
+const W=720,H=258,L=138,R=28,T=16,B=30, MAX=100;
+const g=document.getElementById("bars");
+const ns="http://www.w3.org/2000/svg";
+function el(n,a){const e=document.createElementNS(ns,n);for(const k in a)e.setAttribute(k,a[k]);return e;}
+
+function draw(h){
+  g.textContent="";
+  const rows=DATA[h], bw=(H-T-B)/rows.length, plot=W-L-R;
+  for(let i=0;i<=4;i++){
+    const x=L+plot*(i*25)/MAX;
+    g.appendChild(el("line",{x1:x,y1:T,x2:x,y2:H-B,stroke:"var(--hair)","stroke-width":1}));
+    const t=el("text",{x:x,y:H-B+18,"text-anchor":"middle",fill:"var(--muted)","font-family":"IBM Plex Mono, monospace","font-size":10.5});
+    t.textContent=i*25; g.appendChild(t);
+  }
+  rows.forEach((r,i)=>{
+    const y=T+i*bw+bw*0.19, hgt=bw*0.62, w=plot*Math.min(r[1],MAX)/MAX;
+    const best=r[0]==="full model";
+    g.appendChild(el("rect",{x:L,y:y,width:w,height:hgt,fill:best?"var(--accent)":"var(--muted)",opacity:best?1:0.42}));
+    const lab=el("text",{x:L-12,y:y+hgt/2+4,"text-anchor":"end",fill:"var(--ink)","font-family":"IBM Plex Mono, monospace","font-size":12});
+    lab.textContent=r[0]; g.appendChild(lab);
+    const val=el("text",{x:L+w+9,y:y+hgt/2+4,fill:best?"var(--accent)":"var(--muted)","font-family":"IBM Plex Mono, monospace","font-size":12.5,"font-weight":best?600:400});
+    val.textContent=r[1].toFixed(1); g.appendChild(val);
+  });
+}
+document.querySelectorAll(".ctrl button").forEach(b=>{
+  b.addEventListener("click",()=>{
+    document.querySelectorAll(".ctrl button").forEach(o=>o.setAttribute("aria-pressed","false"));
+    b.setAttribute("aria-pressed","true");
+    draw(b.dataset.h);
+  });
+});
+draw(72);
+</script>
+</body>
+</html>
