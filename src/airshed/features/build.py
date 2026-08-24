@@ -522,10 +522,46 @@ def _scope_to_city(base: pl.DataFrame, cfg: Config) -> pl.DataFrame:
     return base.filter(pl.col("station_id").is_in(keep))
 
 
+def _require_coverage(base: pl.DataFrame, min_coverage: float) -> pl.DataFrame:
+    """Drop stations reporting for less than `min_coverage` of the window.
+
+    Default 0.0, which keeps every station — the right behaviour for GRAP, where
+    CPCB averages whatever is reporting and a drifting basket is faithful to how
+    the policy actually works.
+
+    A controlled experiment needs the opposite. The coupling proof uses city
+    PM2.5 as a *covariate*, and 7 Delhi stations came online in early 2026, so
+    the basket changed by roughly a quarter partway through the evaluation
+    window. A covariate whose definition drifts mid-series is a measurement
+    problem whichever way it moves the answer.
+    """
+    if min_coverage <= 0:
+        return base
+    hours = base["time"].n_unique()
+    if not hours:
+        return base
+    counts = (
+        base.filter(pl.col("pm25_clean").is_not_null())
+        .group_by("station_id")
+        .agg(pl.len().alias("n"))
+    )
+    keep = counts.filter(pl.col("n") >= min_coverage * hours)["station_id"].to_list()
+    dropped = base["station_id"].n_unique() - len(keep)
+    if not keep:
+        log.warning("no station meets %.0f%% coverage; keeping all", 100 * min_coverage)
+        return base
+    log.info(
+        "stable basket: kept %d station(s), dropped %d below %.0f%% coverage",
+        len(keep), dropped, 100 * min_coverage,
+    )
+    return base.filter(pl.col("station_id").is_in(keep))
+
+
 def build_city_base(
     base: pl.DataFrame,
     cfg: Config | None = None,
     min_stations: int = 5,
+    min_coverage: float = 0.0,
 ) -> pl.DataFrame:
     """Collapse the station frame to the city-wide series GRAP is keyed to.
 
@@ -553,6 +589,7 @@ def build_city_base(
     if base.is_empty():
         log.warning("no stations left after scoping to the GRAP city average")
         return base
+    base = _require_coverage(base, min_coverage)
 
     numeric = [
         c for c, dtype in base.schema.items()

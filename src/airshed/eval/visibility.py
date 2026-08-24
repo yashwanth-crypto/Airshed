@@ -57,6 +57,9 @@ POLLUTION_PREFIXES = ("cams_", "obs_", "nbr_", "fire_", "pm25")
 
 # Aviation and road-safety thresholds. Below 1 km, IGI operations degrade and
 # highway pile-ups start; below 0.5 km, low-visibility procedures apply.
+# Minimum share of the window a station must report to enter the city mean.
+STABLE_BASKET_COVERAGE = 0.5
+
 LOW_VIS_KM = 1.0
 VERY_LOW_VIS_KM = 0.5
 
@@ -65,7 +68,11 @@ def build_supervised(start: str, end: str, cfg: Config | None = None) -> pl.Data
     """City-level table with observed visibility as the target."""
     cfg = cfg or load_config()
     base = feat.build_base(start, end, cfg=cfg)
-    city = feat.build_city_base(base, cfg=cfg)
+    # A stable basket, unlike GRAP's. Here city PM2.5 is the covariate under
+    # test, and 7 Delhi stations joined the network partway through the window;
+    # letting the basket drift by a quarter mid-series confounds exactly the
+    # signal this experiment is trying to measure.
+    city = feat.build_city_base(base, cfg=cfg, min_coverage=STABLE_BASKET_COVERAGE)
     if city.is_empty():
         return city
 
@@ -232,6 +239,52 @@ def _by_pollution(
     return pl.DataFrame(rows)
 
 
+def _mechanism_verdict(strata: pl.DataFrame) -> str:
+    """State whether the gain actually concentrates in polluted air.
+
+    The distinction this paragraph exists to make: an RMSE improvement shows the
+    pollution columns carry information, while a gain that rises with the
+    aerosol load is what makes the mechanism aerosol coupling rather than a
+    larger feature set. Reporting the first as if it were the second is the easy
+    mistake, so the text is generated from the table.
+    """
+    needed = {"weather-only", "pollution-informed"}
+    if strata.is_empty() or not needed <= set(strata.columns):
+        return ""
+    # Gain is derived here, the same way the table above derives it, rather than
+    # read from a column that does not exist on this frame.
+    rows = []
+    for r in strata.iter_rows(named=True):
+        wo, pi = r["weather-only"], r["pollution-informed"]
+        if wo and wo == wo and pi == pi:
+            rows.append({**r, "gain": (wo - pi) / wo})
+    if len(rows) < 2:
+        return ""
+    clean, dirty = rows[0], rows[-1]
+    spread = max(r["gain"] for r in rows) - min(r["gain"] for r in rows)
+
+    # "Concentrates" means the dirtiest band gains clearly more than the
+    # cleanest, and the spread across bands is a decent share of the effect.
+    concentrates = dirty["gain"] > clean["gain"] * 2 and spread > 0.02
+
+    if concentrates:
+        return (
+            f"\n**And it is aerosol coupling, not just more columns.** The gain "
+            f"runs {clean['gain']:+.1%} in clean air against "
+            f"{dirty['gain']:+.1%} in the dirtiest band — it concentrates where "
+            f"the aerosol is, which a merely larger feature set would not do."
+        )
+    return (
+        f"\n**But the mechanism test does not pass.** The gain is roughly "
+        f"uniform across pollution bands ({clean['gain']:+.1%} in clean air, "
+        f"{dirty['gain']:+.1%} in the dirtiest, spread {spread:.1%}), so this "
+        f"looks like the pollution columns carrying general information rather "
+        f"than aerosol driving visibility. The RMSE improvement is real and "
+        f"reportable; **the coupling claim is not established by it.** Quote the "
+        f"headline number, not a physical mechanism, until the gain concentrates."
+    )
+
+
 def to_markdown(table: pl.DataFrame, strata: pl.DataFrame, meta: dict) -> str:
     def cell(model: str, horizon: int, column: str):
         row = table.filter((pl.col("model") == model) & (pl.col("horizon_h") == horizon))
@@ -339,6 +392,12 @@ def to_markdown(table: pl.DataFrame, strata: pl.DataFrame, meta: dict) -> str:
                 "as a number on held-out data rather than asserted from "
                 "architecture."
             )
+            # An RMSE gain alone does not establish the mechanism. A larger
+            # feature set improves a model whether or not the extra features are
+            # physically relevant; what separates coupling from that is the gain
+            # concentrating where the aerosol is. So the verdict is required to
+            # read the stratification table rather than stop at the headline.
+            lines.append(_mechanism_verdict(strata))
         else:
             lines.append(
                 "\n**Negative result: pollution information does not improve the "
