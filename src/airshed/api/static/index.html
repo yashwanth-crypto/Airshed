@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Airshed — Delhi NCR</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #0e1116; --panel: #161b22; --line: #262d36;
+    --ink: #e6edf3; --muted: #8b949e; --accent: #4fc3f7;
+    --s1: #f2c94c; --s2: #f2994a; --s3: #eb5757; --s4: #9b51e0;
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+         font:14px/1.5 ui-sans-serif,system-ui,"Segoe UI",Roboto,sans-serif; }
+  header { display:flex; align-items:baseline; gap:16px; flex-wrap:wrap;
+           padding:14px 20px; border-bottom:1px solid var(--line); background:var(--panel); }
+  header h1 { margin:0; font-size:17px; letter-spacing:.2px; }
+  header .sub { color:var(--muted); font-size:12px; }
+  #synced { margin-left:auto; font-size:12px; color:var(--muted); }
+  #synced b { color:var(--ink); font-weight:600; }
+  .stale { color:var(--s3) !important; }
+
+  .wrap { display:grid; grid-template-columns: 1fr 380px; gap:14px; padding:14px; }
+  @media (max-width: 1000px) { .wrap { grid-template-columns: 1fr; } }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:10px; padding:14px; }
+  .card h2 { margin:0 0 10px; font-size:13px; text-transform:uppercase;
+             letter-spacing:.08em; color:var(--muted); font-weight:600; }
+  #map { height:420px; border-radius:8px; overflow:hidden; }
+
+  .controls { display:flex; gap:10px; align-items:center; flex-wrap:wrap; margin-bottom:12px; }
+  input[type=date], select, button {
+    background:#0d1117; color:var(--ink); border:1px solid var(--line);
+    border-radius:7px; padding:7px 10px; font-size:13px; font-family:inherit;
+  }
+  button { cursor:pointer; }
+  button:hover { border-color:var(--accent); }
+  button:disabled { opacity:.5; cursor:default; }
+
+  table { width:100%; border-collapse:collapse; font-size:13px; }
+  td, th { padding:5px 4px; text-align:left; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; font-size:12px; }
+  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+
+  .bar { height:9px; border-radius:5px; background:#0d1117; overflow:hidden; }
+  .bar > div { height:100%; }
+  .stage1 { background:var(--s1);} .stage2 { background:var(--s2);}
+  .stage3 { background:var(--s3);} .stage4 { background:var(--s4);}
+  .pill { display:inline-block; padding:1px 8px; border-radius:20px; font-size:11px;
+          font-weight:600; color:#0e1116; }
+  .muted { color:var(--muted); }
+  .note { font-size:12px; color:var(--muted); margin-top:10px; line-height:1.5; }
+  .err { color:var(--s3); }
+  .legend { display:flex; gap:12px; font-size:11px; color:var(--muted); margin-top:8px; flex-wrap:wrap; }
+  .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Airshed</h1>
+  <span class="sub">Delhi NCR &middot; 72-hour coupled forecast &middot; SIH26082</span>
+  <span id="synced">checking cache…</span>
+</header>
+
+<div class="wrap">
+  <div>
+    <div class="card">
+      <h2>Live forecast — next 72 hours</h2>
+      <div id="live"><span class="muted">loading the latest run…</span></div>
+      <div class="note" id="liveNote"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Historical replay</h2>
+      <div class="controls">
+        <label class="muted" for="date">Pick a past date</label>
+        <input type="date" id="date" />
+        <select id="horizon">
+          <option value="24">24 h ahead</option>
+          <option value="48">48 h ahead</option>
+          <option value="72">72 h ahead</option>
+        </select>
+        <button id="run">Replay</button>
+        <span id="msg" class="muted"></span>
+      </div>
+      <svg id="chart" viewBox="0 0 900 260" preserveAspectRatio="none" style="width:100%;height:260px"></svg>
+      <div class="legend">
+        <span><i style="background:#4fc3f7"></i>forecast (median)</span>
+        <span><i style="background:rgba(79,195,247,.25)"></i>10–90% interval</span>
+        <span><i style="background:#e6edf3"></i>CPCB observed</span>
+        <span><i style="background:#8b949e"></i>raw CAMS</span>
+      </div>
+      <div class="note" id="skill"></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Downscaled surface</h2>
+      <div id="map"></div>
+      <div class="note">
+        Surface is interpolated from the station network with a wind-aware kernel.
+        Held-out station error is 82.6 µg/m³ — this map says which part of the city
+        is worse, not what a specific unmonitored block will read (R7).
+      </div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card">
+      <h2>GRAP stage probability</h2>
+      <div id="grap"><span class="muted">Run a replay to see stage probabilities.</span></div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Why — driver attribution</h2>
+      <div id="drivers"><span class="muted">Run a replay to see what is driving the correction.</span></div>
+      <div class="note">
+        Drivers explain our <em>correction to CAMS</em>, not the pollution itself.
+        The regional load is the CAMS baseline shown above it.
+      </div>
+    </div>
+
+    <div class="card" style="margin-top:14px">
+      <h2>Cache status</h2>
+      <div id="status" class="muted">loading…</div>
+    </div>
+  </div>
+</div>
+
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<script>
+const $ = (id) => document.getElementById(id);
+const fmt = (v, d=0) => (v === null || v === undefined) ? "—" : Number(v).toFixed(d);
+
+const STAGE_NAMES = {1:"I Poor", 2:"II Very Poor", 3:"III Severe", 4:"IV Severe+"};
+
+// ---------------------------------------------------------------- status
+async function loadStatus() {
+  try {
+    const s = await (await fetch("/api/status")).json();
+    const cpcb = s.datasets.cpcb || {};
+    const age = cpcb.age_hours;
+    const stale = age !== null && age > 48;
+    $("synced").innerHTML =
+      `last synced <b>${cpcb.last ?? "never"}</b>` +
+      (age !== null ? ` <span class="${stale ? "stale" : ""}">(${age} h ago)</span>` : "");
+    const rows = Object.entries(s.datasets).map(([name, d]) =>
+      `<tr><td>${name}</td><td class="num">${(d.days ?? 0).toLocaleString()}</td>
+       <td class="num">${d.last ?? "—"}</td></tr>`).join("");
+    $("status").innerHTML =
+      `<table><tr><th>dataset</th><th class="num">days</th><th class="num">latest</th></tr>${rows}</table>`;
+  } catch (e) { $("synced").textContent = "cache unreachable"; }
+}
+
+async function loadDays() {
+  const d = await (await fetch("/api/days")).json();
+  if (!d.last) return;
+  const el = $("date");
+  // Bounded by the *shortest* source, not by ground truth alone: observations
+  // refresh live while CAMS and meteorology are topped up in batch, so
+  // offering the observation range would hand the user dates that fail.
+  el.min = d.first; el.max = d.last;
+  if (d.observations_to && d.observations_to > d.last) {
+    $("msg").innerHTML =
+      `<span class="muted">replay available to <b>${d.last}</b> ` +
+      `(${d.limited_by} lags; observations run to ${d.observations_to})</span>`;
+  }
+  // Default to a November episode if the cache covers one.
+  const nov = `${new Date(d.last).getFullYear() - (new Date(d.last).getMonth() < 10 ? 1 : 0)}-11-12`;
+  el.value = (nov >= d.first && nov <= d.last) ? nov : d.last;
+}
+
+// ---------------------------------------------------------------- live
+function stagePill(p) {
+  // Colour by the most severe stage with a meaningful chance.
+  for (const s of [4,3,2,1]) {
+    if ((p[`at_least_${s}`] ?? 0) >= 0.25) return s;
+  }
+  return 0;
+}
+
+async function loadLive() {
+  try {
+    const r = await fetch("/api/forecast");
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const d = await r.json();
+    const rows = d.horizons.map(h => {
+      const s = stagePill(h.grap);
+      const label = s ? `<span class="pill stage${s}">${STAGE_NAMES[s]}</span>`
+                      : '<span class="muted">below Stage I</span>';
+      const t = new Date(h.target_time).toLocaleString("en-IN",
+        {weekday:"short", hour:"2-digit", minute:"2-digit", timeZone:"Asia/Kolkata"});
+      return `<tr>
+        <td><b>+${h.horizon_h} h</b><br><span class="muted">${t} IST</span></td>
+        <td class="num"><b>${fmt(h.city_pm25)}</b><br>
+            <span class="muted">${fmt(h.lower)}–${fmt(h.upper)}</span></td>
+        <td>${label}<br><span class="muted">P(≥III) ${((h.grap.at_least_3??0)*100).toFixed(0)}%</span></td>
+      </tr>`;
+    }).join("");
+    $("live").innerHTML =
+      `<table><tr><th>lead</th><th class="num">city PM2.5 (10–90%)</th><th>GRAP</th></tr>${rows}</table>`;
+    const age = d.issued_age_hours;
+    $("liveNote").innerHTML =
+      `Issued from observations to <b>${new Date(d.issued).toISOString().slice(0,16).replace("T"," ")} UTC</b> ` +
+      `(<span class="${d.stale ? "err" : ""}">${age} h ago</span>). ` +
+      (d.stale ? "Run <code>airshed ingest live</code> and <code>airshed archive</code> to refresh." : "");
+  } catch (e) {
+    $("live").innerHTML = `<span class="err">${e.message}</span>`;
+    $("liveNote").textContent = "Needs an archived run and recent observations: airshed archive, then airshed ingest live.";
+  }
+}
+
+// ---------------------------------------------------------------- chart
+function drawChart(series) {
+  const svg = $("chart");
+  svg.innerHTML = "";
+  if (!series.length) return;
+  const W = 900, H = 260, P = 34;
+  const vals = series.flatMap(p => [p.upper, p.observed, p.cams, p.forecast]).filter(v => v != null);
+  const max = Math.max(...vals) * 1.1 || 100;
+  const x = i => P + i * (W - P - 10) / Math.max(series.length - 1, 1);
+  const y = v => H - P - (v / max) * (H - P - 12);
+
+  const ns = "http://www.w3.org/2000/svg";
+  const add = (tag, attrs) => {
+    const el = document.createElementNS(ns, tag);
+    for (const k in attrs) el.setAttribute(k, attrs[k]);
+    svg.appendChild(el); return el;
+  };
+
+  // gridlines
+  for (let g = 0; g <= 4; g++) {
+    const v = max * g / 4;
+    add("line", {x1:P, x2:W-10, y1:y(v), y2:y(v), stroke:"#262d36", "stroke-width":1});
+    const t = add("text", {x:4, y:y(v)+4, fill:"#8b949e", "font-size":11});
+    t.textContent = Math.round(v);
+  }
+
+  // uncertainty band
+  const band = series.map((p,i) => `${x(i)},${y(p.upper ?? 0)}`).concat(
+    series.slice().reverse().map((p,i) => {
+      const j = series.length - 1 - i; return `${x(j)},${y(p.lower ?? 0)}`;
+    })).join(" ");
+  add("polygon", {points:band, fill:"rgba(79,195,247,.25)"});
+
+  const line = (key, color, width, dash) => {
+    const pts = series.map((p,i) => p[key] == null ? null : `${x(i)},${y(p[key])}`)
+                      .filter(Boolean).join(" ");
+    add("polyline", {points:pts, fill:"none", stroke:color, "stroke-width":width,
+                     "stroke-dasharray": dash || "", "stroke-linejoin":"round"});
+  };
+  line("cams", "#8b949e", 1.5, "4 3");
+  line("observed", "#e6edf3", 2);
+  line("forecast", "#4fc3f7", 2.2);
+
+  series.forEach((p,i) => {
+    if (i % 4) return;
+    const t = add("text", {x:x(i), y:H-12, fill:"#8b949e", "font-size":10, "text-anchor":"middle"});
+    t.textContent = new Date(p.time).toISOString().slice(11,16);
+  });
+}
+
+// ---------------------------------------------------------------- grap
+function drawGrap(g) {
+  if (!g || g.forecast_24h_mean == null) { $("grap").innerHTML = '<span class="muted">no data</span>'; return; }
+  const p = g.probabilities || {};
+  const rows = [1,2,3,4].map(s => {
+    const v = (p[`at_least_${s}`] ?? 0) * 100;
+    return `<tr>
+      <td><span class="pill stage${s}">${STAGE_NAMES[s]}</span></td>
+      <td style="width:55%"><div class="bar"><div class="stage${s}" style="width:${v.toFixed(0)}%"></div></div></td>
+      <td class="num">${v.toFixed(0)}%</td></tr>`;
+  }).join("");
+  $("grap").innerHTML = `
+    <table><tr><th>probability of reaching</th><th></th><th class="num">P</th></tr>${rows}</table>
+    <div class="note">
+      Forecast 24 h city mean <b>${fmt(g.forecast_24h_mean)}</b> µg/m³ ·
+      observed <b>${fmt(g.observed_24h_mean)}</b> µg/m³ ·
+      actual stage <b>${g.observed_stage ?? "—"}</b>.
+    </div>`;
+}
+
+function drawDrivers(list) {
+  if (!list || !list.length) { $("drivers").innerHTML = '<span class="muted">no attribution available</span>'; return; }
+  const max = Math.max(...list.map(d => Math.abs(d.magnitude))) || 1;
+  $("drivers").innerHTML = "<table>" + list.map(d => {
+    const up = d.mean_contribution > 0;
+    const w = (Math.abs(d.magnitude) / max * 100).toFixed(0);
+    return `<tr><td>${d.driver}</td>
+      <td style="width:45%"><div class="bar"><div style="width:${w}%;background:${up ? "#eb5757" : "#4fc3f7"}"></div></div></td>
+      <td class="num">${up ? "+" : ""}${fmt(d.mean_contribution,1)}</td></tr>`;
+  }).join("") + "</table>";
+}
+
+// ---------------------------------------------------------------- replay
+async function runReplay() {
+  const date = $("date").value, horizon = $("horizon").value;
+  if (!date) return;
+  $("run").disabled = true; $("msg").textContent = "reconstructing…"; $("msg").className = "muted";
+  try {
+    const r = await fetch(`/api/replay/${date}?horizon=${horizon}`);
+    if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
+    const data = await r.json();
+    drawChart(data.city_series || []);
+    drawGrap(data.grap);
+    drawDrivers(data.drivers);
+    const s = data.skill || {};
+    $("skill").innerHTML =
+      `Issued ${horizon} h ahead · ${s.n ?? 0} station-hours · ` +
+      `model RMSE <b>${fmt(s.rmse_model,1)}</b> µg/m³ vs raw CAMS <b>${fmt(s.rmse_cams,1)}</b> · ` +
+      `observed mean ${fmt(s.observed_mean)} µg/m³.`;
+    $("msg").textContent = "";
+    const noon = data.city_series?.[Math.floor((data.city_series.length||1)/2)]?.time;
+    if (noon) loadSurface(noon);
+  } catch (e) {
+    $("msg").textContent = e.message; $("msg").className = "err";
+  } finally { $("run").disabled = false; }
+}
+
+// ---------------------------------------------------------------- map
+let map = null, mapReady = false;
+function initMap() {
+  if (typeof maplibregl === "undefined") {
+    $("map").innerHTML = '<div class="note" style="padding:16px">' +
+      'Map library unavailable offline — panels above still work.</div>';
+    return;
+  }
+  map = new maplibregl.Map({
+    container: "map",
+    style: "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json",
+    center: [77.15, 28.62], zoom: 8.4, attributionControl: true,
+  });
+  map.on("load", () => {
+    mapReady = true;
+    // The container is laid out after the map is constructed, so without an
+    // explicit resize MapLibre keeps the zero-size viewport it was born with
+    // and renders the whole world instead of Delhi.
+    map.resize();
+    map.fitBounds([[76.70, 28.10], [77.70, 29.10]], {padding: 24, duration: 0});
+  });
+  map.on("error", () => {});
+  window.addEventListener("resize", () => { if (map) map.resize(); });
+}
+
+const RAMP = [[0,"#2ecc71"],[60,"#f2c94c"],[120,"#f2994a"],[250,"#eb5757"],[400,"#9b51e0"]];
+function colorFor(v) {
+  if (v == null) return "#444";
+  let c = RAMP[0][1];
+  for (const [t, col] of RAMP) if (v >= t) c = col;
+  return c;
+}
+
+async function loadSurface(stamp) {
+  if (!mapReady) return;
+  try {
+    const d = await (await fetch(`/api/surface/${encodeURIComponent(stamp)}`)).json();
+    const cells = {type:"FeatureCollection", features:(d.cells||[]).filter(c=>c.pm25!=null).map(c => ({
+      type:"Feature", properties:{pm25:c.pm25, color:colorFor(c.pm25)},
+      geometry:{type:"Point", coordinates:[c.lon, c.lat]}
+    }))};
+    const sts = {type:"FeatureCollection", features:(d.stations||[]).filter(s=>s.pm25!=null).map(s => ({
+      type:"Feature", properties:{name:s.name, pm25:s.pm25},
+      geometry:{type:"Point", coordinates:[s.lon, s.lat]}
+    }))};
+    setSource("cells", cells, () => map.addLayer({id:"cells", type:"circle", source:"cells",
+      paint:{"circle-radius":9, "circle-color":["get","color"], "circle-opacity":0.55, "circle-blur":0.6}}));
+    setSource("stations", sts, () => map.addLayer({id:"stations", type:"circle", source:"stations",
+      paint:{"circle-radius":4, "circle-color":"#ffffff", "circle-stroke-color":"#0e1116", "circle-stroke-width":1}}));
+  } catch (e) { /* surface is optional to the story */ }
+}
+
+function setSource(id, data, addLayer) {
+  if (map.getSource(id)) { map.getSource(id).setData(data); return; }
+  map.addSource(id, {type:"geojson", data});
+  addLayer();
+}
+
+$("run").addEventListener("click", runReplay);
+initMap();
+loadStatus();
+loadLive();
+loadDays().then(runReplay);
+</script>
+</body>
+</html>

@@ -1,0 +1,453 @@
+"""Align every source onto one tz-aware hourly UTC index, then build the
+supervised table.
+
+Two stages, deliberately separate:
+
+`build_base`        one row per (station, hour) over a *complete* hourly index,
+                    every source left-joined on. Missing data stays null.
+
+`build_supervised`  one row per (station, issue_time, horizon) — the direct
+                    multi-horizon layout R4 requires. No recursive rollout
+                    exists anywhere in this codebase.
+
+Three correctness rules this module exists to enforce:
+
+1. The index is built complete *before* any lag is taken. Lags are positional
+   shifts, so on a gappy frame `shift(24)` would silently mean "24 rows back",
+   which during an outage is not 24 hours. On a complete index it is exact.
+
+2. Observation features are read strictly at or before `issue_time`; forecast
+   features (CAMS, meteorology) are read at `target_time`, because a forecast
+   for t+72 genuinely is available at t. That asymmetry is the whole design,
+   and mixing it up is leakage.
+
+3. Nothing is forward-filled across a gap. Rolling windows require a minimum
+   number of real observations and return null otherwise (R6).
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import logging
+
+import polars as pl
+
+from ..config import Config, load_config
+from ..store import read_range
+
+log = logging.getLogger(__name__)
+
+# Rolling windows need this fraction of the window to be real observations,
+# otherwise the window is null. This is the explicit "do not bridge a gap" rule.
+MIN_COVERAGE = 0.6
+
+OBS_LAGS_H = [1, 2, 3, 6, 12, 24, 48, 72]
+OBS_WINDOWS_H = [3, 24, 72]
+
+CAMS_COLS = [
+    "pm2_5", "pm10", "carbon_monoxide", "nitrogen_dioxide",
+    "sulphur_dioxide", "ozone", "dust", "aerosol_optical_depth",
+]
+MET_COLS = [
+    "temperature_2m", "relative_humidity_2m", "dew_point_2m", "surface_pressure",
+    "wind_speed_10m", "wind_direction_10m", "wind_gusts_10m", "wind_speed_100m",
+    "wind_direction_100m", "boundary_layer_height", "precipitation", "cloud_cover",
+    "shortwave_radiation", "cape", "visibility", "u10", "v10", "ventilation_index",
+    "temperature_925hPa", "temperature_850hPa", "wind_speed_925hPa",
+    "wind_direction_925hPa", "geopotential_height_925hPa",
+    "lapse_2m_925", "lapse_925_850", "inversion", "blh_available",
+]
+METAR_COLS = [
+    "visibility_km", "visibility_km_min", "dew_point_depression_c",
+    "relative_humidity", "temp_c", "n_obs",
+]
+
+
+def hourly_index(
+    start: dt.date | str,
+    end: dt.date | str,
+    stations: list[str],
+) -> pl.DataFrame:
+    """Complete (station_id, time) grid, hourly, UTC, end-date inclusive."""
+    start_d = _as_date(start)
+    end_d = _as_date(end)
+    first = dt.datetime.combine(start_d, dt.time.min, tzinfo=dt.timezone.utc)
+    last = dt.datetime.combine(end_d, dt.time(23, 0), tzinfo=dt.timezone.utc)
+    times = pl.datetime_range(first, last, interval="1h", time_zone="UTC", eager=True)
+    return (
+        pl.DataFrame({"station_id": stations})
+        .join(pl.DataFrame({"time": times}), how="cross")
+        .sort(["station_id", "time"])
+    )
+
+
+def build_base(
+    start: dt.date | str,
+    end: dt.date | str,
+    cfg: Config | None = None,
+    cams_dataset: str = "cams_archive",
+    meteo_dataset: str = "meteo_archive",
+    use_upwind: bool = True,
+) -> pl.DataFrame:
+    """Join every cached source onto the complete hourly index.
+
+    Reads only from the local store — no network (R8). A source with no cached
+    partitions contributes all-null columns rather than vanishing, so a caller
+    can see what is missing instead of silently training on fewer features.
+    """
+    cfg = cfg or load_config()
+    station_ids = [s.id for s in cfg.stations]
+    base = hourly_index(start, end, station_ids)
+
+    base = _join_cpcb(base, start, end)
+    base = _join_cams(base, start, end, cams_dataset)
+    base = _join_meteo(base, start, end, meteo_dataset)
+    base = _join_metar(base, start, end)
+    base = _join_fires(base, start, end, cfg)
+    if use_upwind:
+        # Corridor transport, joined on time and broadcast to every station:
+        # the upwind network is 65-340 km away and resolves the airshed, not
+        # differences between neighbourhoods.
+        from .upwind import upwind_features
+
+        base = upwind_features(base, cfg=cfg, start=start, end=end)
+
+    base = _add_observation_features(base)
+    base = _add_calendar_features(base)
+    return base.sort(["station_id", "time"])
+
+
+def build_supervised(
+    base: pl.DataFrame,
+    cfg: Config | None = None,
+    horizons: list[int] | None = None,
+    target: str = "pm25_clean",
+    forecast_cols: list[str] | None = None,
+    extra_targets: dict[str, str] | None = None,
+) -> pl.DataFrame:
+    """One row per (station, issue_time, horizon) — direct multi-horizon (R4).
+
+    Observation-derived columns keep their value at `issue_time`. Forecast
+    columns are re-read at `target_time` and suffixed `_tgt`, since that is the
+    value a real forecast issued at `issue_time` would have had for the target
+    hour. Rows whose target is missing are dropped: an absent observation is
+    not a zero (R6).
+    """
+    cfg = cfg or load_config()
+    horizons = horizons or cfg.horizons
+    if base.is_empty():
+        return base
+
+    fc_cols = forecast_cols or _default_forecast_cols(base)
+    fc_cols = [c for c in fc_cols if c in base.columns]
+
+    # Secondary targets for the coupled model — observed series read at the
+    # target hour, exactly like `y`. They are targets, never inputs: a
+    # visibility *observation* from the future is not available at issue time,
+    # and only the primary target's absence drops a row.
+    extra = {k: v for k, v in (extra_targets or {}).items() if v in base.columns}
+    targets = base.select(
+        ["station_id", "time", target] + list(extra.values()) + fc_cols
+    ).rename(
+        {"time": "target_time", target: "y"}
+        | {src: name for name, src in extra.items()}
+        | {c: f"{c}_tgt" for c in fc_cols}
+    )
+
+    out = []
+    for h in horizons:
+        issued = base.with_columns(
+            (pl.col("time") + pl.duration(hours=h)).alias("target_time"),
+            pl.lit(h, dtype=pl.Int32).alias("horizon_h"),
+        ).rename({"time": "issue_time"})
+        joined = issued.join(targets, on=["station_id", "target_time"], how="inner")
+        out.append(joined)
+
+    frame = pl.concat(out, how="vertical_relaxed")
+    before = frame.height
+    frame = frame.drop_nulls("y")
+    log.info(
+        "supervised rows %d -> %d after dropping missing targets", before, frame.height
+    )
+    return frame.sort(["station_id", "issue_time", "horizon_h"])
+
+
+# ---------------------------------------------------------------------------
+# joins
+# ---------------------------------------------------------------------------
+def _join_cpcb(base: pl.DataFrame, start, end) -> pl.DataFrame:
+    obs = read_range("cpcb", start, end)
+    if obs.is_empty():
+        log.warning("no cached CPCB observations for %s..%s", start, end)
+        return base.with_columns(
+            pl.lit(None, dtype=pl.Float64).alias("pm25"),
+            pl.lit(None, dtype=pl.Float64).alias("pm25_clean"),
+            pl.lit(None, dtype=pl.UInt32).alias("obs_n"),
+            pl.lit(None, dtype=pl.Utf8).alias("quality_flag"),
+        )
+    obs = obs.select(
+        "station_id", "time", "pm25", "pm25_clean",
+        pl.col("n_obs").alias("obs_n"), "quality_flag",
+    ).unique(subset=["station_id", "time"], keep="first")
+    return base.join(obs, on=["station_id", "time"], how="left")
+
+
+def _join_cams(base: pl.DataFrame, start, end, dataset: str) -> pl.DataFrame:
+    cams = read_range(dataset, start, end)
+    if cams.is_empty():
+        log.warning("no cached CAMS (%s) for %s..%s", dataset, start, end)
+        return base.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(f"cams_{c}") for c in CAMS_COLS]
+            + [pl.lit(None, dtype=pl.Utf8).alias("cams_source_class")]
+        )
+    keep = [c for c in CAMS_COLS if c in cams.columns]
+    cams = (
+        cams.select(["station_id", "time", "source_class"] + keep)
+        .unique(subset=["station_id", "time"], keep="last")
+        .rename({c: f"cams_{c}" for c in keep} | {"source_class": "cams_source_class"})
+    )
+    return base.join(cams, on=["station_id", "time"], how="left")
+
+
+def _join_meteo(base: pl.DataFrame, start, end, dataset: str) -> pl.DataFrame:
+    met = read_range(dataset, start, end)
+    if met.is_empty():
+        log.warning("no cached meteorology (%s) for %s..%s", dataset, start, end)
+        return base.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(f"met_{c}") for c in MET_COLS]
+        )
+    keep = [c for c in MET_COLS if c in met.columns]
+    met = (
+        met.select(["station_id", "time"] + keep)
+        .unique(subset=["station_id", "time"], keep="last")
+        .rename({c: f"met_{c}" for c in keep})
+    )
+    return base.join(met, on=["station_id", "time"], how="left")
+
+
+def _join_metar(base: pl.DataFrame, start, end) -> pl.DataFrame:
+    """METAR is one airport, joined on time alone and broadcast to all stations.
+
+    That is a real approximation: VIDP visibility is not Rohini's visibility.
+    It is kept because it is the only *measured* visibility we have, and it is
+    named `metar_*` so no one mistakes it for a per-station observation.
+    """
+    metar = read_range("metar", start, end)
+    if metar.is_empty():
+        log.warning("no cached METAR for %s..%s", start, end)
+        return base.with_columns(
+            [pl.lit(None, dtype=pl.Float64).alias(f"metar_{c}") for c in METAR_COLS]
+        )
+    primary = metar["metar_station"].mode().to_list()[0]
+    keep = [c for c in METAR_COLS if c in metar.columns]
+    metar = (
+        metar.filter(pl.col("metar_station") == primary)
+        .select(["time"] + keep)
+        .unique(subset=["time"], keep="first")
+        .rename({c: f"metar_{c}" for c in keep})
+    )
+    return base.join(metar, on="time", how="left")
+
+
+def _join_fires(base: pl.DataFrame, start, end, cfg: Config) -> pl.DataFrame:
+    """Regional fire load, joined on time.
+
+    `fires_available` separates "no detections" from "no data" — in June both
+    look like zero, and only one of them means the air is clean.
+    """
+    fires = read_range("fires", start, end)
+    if fires.is_empty():
+        # Same columns as the populated case — a feature that disappears when a
+        # source is missing breaks the model signature between train and serve.
+        return base.with_columns(
+            pl.lit(0.0).alias("fire_count_1h"),
+            pl.lit(0.0).alias("fire_frp_1h"),
+            pl.lit(0.0).alias("fire_count_24h"),
+            pl.lit(0.0).alias("fire_frp_24h"),
+            pl.lit(0.0).alias("fire_count_72h"),
+            pl.lit(False).alias("fires_available"),
+        )
+    hourly = (
+        fires.with_columns(pl.col("time").dt.truncate("1h").alias("time"))
+        .group_by("time")
+        .agg(
+            pl.len().cast(pl.Float64).alias("fire_count_1h"),
+            pl.col("frp").sum().alias("fire_frp_1h"),
+        )
+    )
+    out = base.join(hourly, on="time", how="left").with_columns(
+        pl.col("fire_count_1h").fill_null(0.0),
+        pl.col("fire_frp_1h").fill_null(0.0),
+        pl.lit(True).alias("fires_available"),
+    )
+    # Smoke takes a day or two to arrive, so the useful predictor is the recent
+    # cumulative burn, not this hour's detections.
+    return out.with_columns(
+        pl.col("fire_count_1h").rolling_sum(24, min_samples=1).over("station_id").alias("fire_count_24h"),
+        pl.col("fire_frp_1h").rolling_sum(24, min_samples=1).over("station_id").alias("fire_frp_24h"),
+        pl.col("fire_count_1h").rolling_sum(72, min_samples=1).over("station_id").alias("fire_count_72h"),
+    )
+
+
+# ---------------------------------------------------------------------------
+# derived features
+# ---------------------------------------------------------------------------
+def _add_observation_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Lags and rolling statistics of the observed series.
+
+    Safe only because the index is complete: shift(k) is exactly k hours.
+    """
+    out = df.with_columns(
+        [
+            pl.col("pm25_clean").shift(k).over("station_id").alias(f"obs_lag_{k}h")
+            for k in OBS_LAGS_H
+        ]
+    )
+    for w in OBS_WINDOWS_H:
+        min_samples = max(1, int(w * MIN_COVERAGE))
+        out = out.with_columns(
+            pl.col("pm25_clean")
+            .rolling_mean(w, min_samples=min_samples)
+            .over("station_id")
+            .alias(f"obs_mean_{w}h"),
+            pl.col("pm25_clean")
+            .rolling_std(w, min_samples=min_samples)
+            .over("station_id")
+            .alias(f"obs_std_{w}h"),
+        )
+
+    # Observed visibility history, on the same footing as PM2.5 history.
+    # BUILD_PLAN's coupled core requires each series' recent history to be
+    # available to all of them: fog and haze are the same physical state seen
+    # through two instruments, and a model that can see last night's visibility
+    # collapse knows something about this morning's PM2.5 that CAMS does not.
+    if "metar_visibility_km" in out.columns:
+        out = out.with_columns(
+            [
+                pl.col("metar_visibility_km").shift(k).over("station_id").alias(f"vis_lag_{k}h")
+                for k in (1, 3, 24)
+            ]
+        )
+        out = out.with_columns(
+            pl.col("metar_visibility_km")
+            .rolling_min(24, min_samples=int(24 * MIN_COVERAGE))
+            .over("station_id")
+            .alias("vis_min_24h"),
+            pl.col("metar_visibility_km")
+            .rolling_mean(24, min_samples=int(24 * MIN_COVERAGE))
+            .over("station_id")
+            .alias("vis_mean_24h"),
+        )
+
+    # Staleness: how many hours since this station last reported. A model that
+    # cannot see this will treat a three-day-old lag as if it were fresh.
+    out = out.with_columns(
+        pl.int_range(pl.len()).over("station_id").alias("_row"),
+    )
+    out = out.with_columns(
+        pl.when(pl.col("pm25_clean").is_not_null())
+        .then(pl.col("_row"))
+        .otherwise(None)
+        .forward_fill()
+        .over("station_id")
+        .alias("_last_ok")
+    )
+    out = out.with_columns(
+        (pl.col("_row") - pl.col("_last_ok")).cast(pl.Int32).alias("obs_gap_h"),
+        (pl.col("pm25_clean") - pl.col("pm25_clean").shift(24).over("station_id")).alias(
+            "obs_delta_24h"
+        ),
+    ).drop(["_row", "_last_ok"])
+    return out
+
+
+def _add_calendar_features(df: pl.DataFrame) -> pl.DataFrame:
+    """Calendar terms in IST, because human activity follows local clock time.
+
+    This is the only place local time is allowed to appear, and it produces
+    numbers, not timestamps — every stored timestamp stays UTC.
+    """
+    ist = pl.col("time").dt.convert_time_zone("Asia/Kolkata")
+    two_pi = 2 * 3.141592653589793
+    return df.with_columns(
+        ist.dt.hour().alias("hour_ist"),
+        ist.dt.weekday().alias("weekday_ist"),
+        ist.dt.month().alias("month"),
+        ist.dt.ordinal_day().alias("doy"),
+        (two_pi * ist.dt.hour() / 24).sin().alias("hour_sin"),
+        (two_pi * ist.dt.hour() / 24).cos().alias("hour_cos"),
+        (two_pi * ist.dt.ordinal_day() / 365.25).sin().alias("doy_sin"),
+        (two_pi * ist.dt.ordinal_day() / 365.25).cos().alias("doy_cos"),
+    )
+
+
+def _default_forecast_cols(base: pl.DataFrame) -> list[str]:
+    """Columns legitimately knowable at issue time for a future hour."""
+    return [
+        c
+        for c in base.columns
+        if c.startswith(("cams_", "met_"))
+        or c in {"fire_count_24h", "fire_frp_24h", "fire_count_72h", "fires_available"}
+        or c in {"hour_sin", "hour_cos", "doy_sin", "doy_cos", "hour_ist", "weekday_ist", "month"}
+    ]
+
+
+def _as_date(value: dt.date | str) -> dt.date:
+    return dt.date.fromisoformat(value) if isinstance(value, str) else value
+
+
+CITY_ID = "CITY"
+
+
+def build_city_base(
+    base: pl.DataFrame,
+    cfg: Config | None = None,
+    min_stations: int = 5,
+) -> pl.DataFrame:
+    """Collapse the station frame to the city-wide series GRAP is keyed to.
+
+    GRAP is invoked on Delhi's city-wide average AQI, not on any one station,
+    and that AQI is computed from a 24-hour mean. Modelling the city quantity
+    directly avoids having to combine 51 correlated station forecasts into one
+    number afterwards -- an aggregation that needs a covariance we do not have
+    and would get wrong.
+
+    Hours covered by fewer than `min_stations` reporting stations produce a
+    null target: during an outage the surviving stations are not a random
+    sample of the city (R6).
+    """
+    cfg = cfg or load_config()
+    if base.is_empty():
+        return base
+
+    numeric = [
+        c for c, dtype in base.schema.items()
+        if dtype.is_numeric() and c not in {"obs_n"}
+    ]
+    city = (
+        base.group_by("time")
+        .agg(
+            [pl.col(c).mean().alias(c) for c in numeric]
+            + [
+                pl.col("pm25_clean").count().alias("n_stations"),
+                pl.col("pm25_clean").max().alias("worst_station_pm25"),
+            ]
+        )
+        .sort("time")
+        .with_columns(pl.lit(CITY_ID).alias("station_id"))
+    )
+    city = city.with_columns(
+        pl.when(pl.col("n_stations") >= min_stations)
+        .then(pl.col("pm25_clean"))
+        .otherwise(None)
+        .alias("pm25_clean")
+    )
+
+    # The GRAP-relevant quantity: the 24-hour running mean, which is what the
+    # CPCB AQI is defined on. Requires 16 of 24 hours, per the CPCB rule.
+    city = city.with_columns(
+        pl.col("pm25_clean").rolling_mean(24, min_samples=16).alias("city_pm25_24h"),
+        pl.col("cams_pm2_5").rolling_mean(24, min_samples=16).alias("cams_pm25_24h"),
+    )
+    city = _add_observation_features(city)
+    return _add_calendar_features(city)
