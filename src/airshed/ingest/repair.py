@@ -35,6 +35,29 @@ def missing_stations(dataset: str, cfg: Config | None = None) -> list[str]:
     return [s.id for s in cfg.stations if s.id not in present]
 
 
+def short_partitions(
+    dataset: str, min_stations: int, cfg: Config | None = None
+) -> list:
+    """Partitions carrying fewer than `min_stations` distinct stations.
+
+    Adding stations mid-life leaves a dataset ragged: complete for the range the
+    backfill reached and short thereafter. `missing_stations` only inspects the
+    newest partition, which answers "is anything missing" but not "over which
+    dates", and refetching the whole range every time is wasteful once most of
+    it is done.
+
+    Reads one column per partition, so it is cheap enough to run daily.
+    """
+    out = []
+    for day in available_dates(dataset):
+        n = pl.read_parquet(
+            partition_path(dataset, day), columns=["station_id"]
+        )["station_id"].n_unique()
+        if n < min_stations:
+            out.append(day)
+    return out
+
+
 def expand(dataset: str, cfg: Config | None = None) -> int:
     """Copy each missing station's cell-mate rows across every partition.
 

@@ -494,6 +494,31 @@ def _as_date(value: dt.date | str) -> dt.date:
 CITY_ID = "CITY"
 
 
+def _scope_to_city(base: pl.DataFrame, cfg: Config) -> pl.DataFrame:
+    """Keep only the stations that define the statutory city average."""
+    cities = cfg.raw.get("grap", {}).get("city_average_cities")
+    if not cities:
+        # No setting means "every station", which is what this did before the
+        # setting existed. Say so rather than changing behaviour silently.
+        log.warning(
+            "grap.city_average_cities is unset — averaging all %d stations, "
+            "which is not the quantity GRAP is keyed to",
+            base["station_id"].n_unique(),
+        )
+        return base
+
+    wanted = {c.strip().lower() for c in cities}
+    keep = [s.id for s in cfg.stations if s.city.strip().lower() in wanted]
+    if not keep:
+        log.warning("no configured station matches grap.city_average_cities=%s", cities)
+        return base.clear()
+    log.info(
+        "city average scoped to %d of %d stations (%s)",
+        len(keep), len(cfg.stations), ", ".join(sorted(wanted)),
+    )
+    return base.filter(pl.col("station_id").is_in(keep))
+
+
 def build_city_base(
     base: pl.DataFrame,
     cfg: Config | None = None,
@@ -503,9 +528,15 @@ def build_city_base(
 
     GRAP is invoked on Delhi's city-wide average AQI, not on any one station,
     and that AQI is computed from a 24-hour mean. Modelling the city quantity
-    directly avoids having to combine 51 correlated station forecasts into one
+    directly avoids having to combine correlated station forecasts into one
     number afterwards -- an aggregation that needs a covariance we do not have
     and would get wrong.
+
+    **Only the cities in `grap.city_average_cities` are averaged.** CAQM keys
+    GRAP to Delhi's own AQI, so averaging in Gurugram, Ghaziabad or Bhiwadi
+    computes a different quantity and then compares it against statutory Delhi
+    thresholds. The station model still trains on every station; the scoping
+    applies to this aggregate alone.
 
     Hours covered by fewer than `min_stations` reporting stations produce a
     null target: during an outage the surviving stations are not a random
@@ -513,6 +544,11 @@ def build_city_base(
     """
     cfg = cfg or load_config()
     if base.is_empty():
+        return base
+
+    base = _scope_to_city(base, cfg)
+    if base.is_empty():
+        log.warning("no stations left after scoping to the GRAP city average")
         return base
 
     numeric = [

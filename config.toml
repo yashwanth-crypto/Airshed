@@ -49,6 +49,20 @@ issue_hour_utc = 0          # nominal daily issue time (05:30 IST)
 [grap]
 aggregate = "city_mean_aqi"
 
+# Which stations define the city average GRAP is keyed to.
+#
+# This is not a filter for tidiness. CAQM invokes GRAP on **Delhi's** average
+# AQI, which CPCB computes from Delhi's own CAAQMS stations. Averaging in
+# Gurugram, Ghaziabad or Bhiwadi produces a different quantity that happens to
+# look similar, and forecasting it against statutory Delhi thresholds would be
+# forecasting the wrong number well.
+#
+# It mattered less when config carried 37 Delhi stations out of 51 (73%). The
+# 2026-08 expansion to 78 stations reaches deep into the NCR ring — Meerut at
+# 60 km, Bhiwadi at 57, Dharuhera at 59 — and would have left Delhi at 53% of
+# its own average. The station model still uses every station; only this
+# aggregate is scoped.
+city_average_cities = ["Delhi", "New Delhi"]
 
 [[grap.stages]]
 stage      = 1
@@ -335,6 +349,43 @@ stations = [
   { id = "HR005", name = "New Industrial Town", city = "Faridabad", agency = "HSPCB", lat = 28.39072, lon = 77.30059, openaq_id = 10920 },
   { id = "HR006", name = "Bahadurgarh", city = "Bahadurgarh", agency = "HSPCB", lat = 28.6701, lon = 76.9254, openaq_id = 6936 },
   { id = "HR007", name = "Sector 30", city = "Faridabad", agency = "HSPCB", lat = 28.441681, lon = 77.321671, openaq_id = 10820 },
+  # --- added 2026-08-24: NCR expansion, 51 -> 77 -------------------------
+  # Discovered with `airshed cpcb discover`, which reads what OpenAQ actually
+  # serves instead of matching a hand-written roster, so these coordinates are
+  # operator-published and every feed was live within 14 days.
+  #
+  # Excluded on purpose: AirGradient and Clarity (low-cost, out of scope per
+  # CLAUDE.md), AirNow and StateAir (US diplomatic posts, a different network),
+  # every `caaqm`-provider registration (all dead by 2018 or 2022 - the
+  # duplicate-registration trap in data-findings section 8), and "Pusa, Delhi -
+  # DPCC", which sits 0.00 km from DL024 and would have given
+  # leave-one-station-out a perfect twin to read the answer off.
+  { id = "DL038", name = "Talkatora Garden", city = "Delhi", agency = "DPCC", lat = 28.62181, lon = 77.194463, openaq_id = 6254594 },
+  { id = "DL039", name = "IIT Delhi", city = "Delhi", agency = "IITM", lat = 28.54246, lon = 77.191651, openaq_id = 6148686 },
+  { id = "DL040", name = "Commonwealth Sports Complex", city = "Delhi", agency = "DPCC", lat = 28.615828, lon = 77.271992, openaq_id = 6254665 },
+  { id = "DL041", name = "JNU", city = "Delhi", agency = "DPCC", lat = 28.540721, lon = 77.168544, openaq_id = 6254663 },
+  { id = "DL042", name = "Cantonment Area", city = "Delhi", agency = "DPCC", lat = 28.594169, lon = 77.1251, openaq_id = 6257818 },
+  { id = "DL043", name = "IGNOU Maidan Garhi", city = "Delhi", agency = "DPCC", lat = 28.493624, lon = 77.201159, openaq_id = 6254666 },
+  { id = "UP008", name = "Prashant Garden", city = "Khora", agency = "UPPCB", lat = 28.61119, lon = 77.34206, openaq_id = 6299494 },
+  { id = "UP009", name = "Ved Vihar-Loni", city = "Ghaziabad", agency = "UPPCB", lat = 28.739153, lon = 77.273668, openaq_id = 6299678 },
+  { id = "UP010", name = "Sector-116", city = "Noida", agency = "UPPCB", lat = 28.56923, lon = 77.393848, openaq_id = 6988 },
+  { id = "HR008", name = "NISE Gwal Pahari", city = "Gurugram", agency = "IMD", lat = 28.422681, lon = 77.148944, openaq_id = 10921 },
+  { id = "UP011", name = "Sanjay Nagar", city = "Ghaziabad", agency = "UPPCB", lat = 28.685382, lon = 77.453839, openaq_id = 10919 },
+  { id = "DL044", name = "NSUT Jaffarpur", city = "Delhi", agency = "DPCC", lat = 28.594004, lon = 76.909423, openaq_id = 6254664 },
+  { id = "UP012", name = "Wave City", city = "Ghaziabad", agency = "UPPCB", lat = 28.646675, lon = 77.489049, openaq_id = 6458520 },
+  { id = "UP013", name = "Govindpuram", city = "Ghaziabad", agency = "UPPCB", lat = 28.694528, lon = 77.494705, openaq_id = 6311324 },
+  { id = "HR009", name = "Nathu Colony", city = "Ballabgarh", agency = "HSPCB", lat = 28.341925, lon = 77.319699, openaq_id = 6972 },
+  { id = "UP014", name = "Knowledge Park - III", city = "Greater Noida", agency = "UPPCB", lat = 28.47272, lon = 77.482, openaq_id = 6978 },
+  { id = "HR010", name = "Sector-2 IMT", city = "Manesar", agency = "HSPCB", lat = 28.360699, lon = 76.93609, openaq_id = 6953 },
+  { id = "UP015", name = "SRM University", city = "Modinagar", agency = "UPPCB", lat = 28.798171, lon = 77.540243, openaq_id = 6299603 },
+  { id = "UP016", name = "Sardar Patel Inter College", city = "Baghpat", agency = "UPPCB", lat = 28.964949, lon = 77.278761, openaq_id = 301388 },
+  { id = "HR011", name = "Amity University", city = "Panchgaon", agency = "IITM", lat = 28.3153, lon = 76.9143, openaq_id = 3410004 },
+  { id = "HR012", name = "Murthal", city = "Sonipat", agency = "HSPCB", lat = 29.0272, lon = 77.0621, openaq_id = 6951 },
+  { id = "HR013", name = "Shyam Nagar", city = "Palwal", agency = "HSPCB", lat = 28.148556, lon = 77.332067, openaq_id = 7280 },
+  { id = "RJ001", name = "RIICO Ind. Area III", city = "Bhiwadi", agency = "RSPCB", lat = 28.194909, lon = 76.862296, openaq_id = 5588 },
+  { id = "RJ002", name = "Vasundhara Nagar_UIT", city = "Bhiwadi", agency = "RSPCB", lat = 28.207266, lon = 76.829265, openaq_id = 3409519 },
+  { id = "HR014", name = "Municipal Corporation Office", city = "Dharuhera", agency = "HSPCB", lat = 28.2068, lon = 76.7997, openaq_id = 6949 },
+  { id = "UP017", name = "MIET College", city = "Meerut", agency = "UPPCB", lat = 28.972677, lon = 77.641018, openaq_id = 6311325 },
 ]
 
 # ---------------------------------------------------------------------------

@@ -38,7 +38,7 @@ import polars as pl
 
 from ..config import Config, Station, load_config
 from ..net import USER_AGENT, get_json
-from ..store import missing_dates, write_partitioned
+from ..store import available_dates, missing_dates, partition_path, write_partitioned
 
 log = logging.getLogger(__name__)
 
@@ -298,6 +298,227 @@ def resolve_ids(cfg: Config | None = None, max_km: float = 3.0) -> dict[str, int
     return {r["station_id"]: r["openaq_id"] for r in resolve_stations(cfg, max_km)}
 
 
+# ---------------------------------------------------------------------------
+# discovery
+# ---------------------------------------------------------------------------
+# Providers whose stations belong in the model. Everything else in the NCR bbox
+# is deliberately excluded, and the exclusions are the point:
+#
+#   AirGradient, Clarity  low-cost sensors. CLAUDE.md puts sensor fusion out of
+#                         scope unless we obtain network access, and mixing an
+#                         uncalibrated series into CPCB ground truth would
+#                         corrupt the target rather than enrich it.
+#   AirNow, StateAir      US diplomatic post monitors. Good instruments, but a
+#                         different network with its own calibration, and the
+#                         GRAP thresholds we forecast against are defined on the
+#                         CAAQMS average.
+#
+# `N/A` is not a mistake: OpenAQ leaves the provider blank on the DPCC/UPPCB
+# stations registered during 2026, which are exactly the roster entries missing
+# from config. They are identified by the agency suffix in the name, the same
+# way every other station here is.
+OFFICIAL_PROVIDERS = {"CPCB", "caaqm", "N/A"}
+
+# A station whose feed stopped this long ago is a dead registration, not a
+# station having a bad week. OpenAQ carries several dead registrations per real
+# CAAQMS site (see docs/notes/data-findings.md section 8) and matching one is
+# worse than missing it: empty ground truth reads as a routine outage (R6).
+LIVE_WITHIN_DAYS = 14
+
+# A candidate this close to a station already in config is treated as
+# co-located and excluded by default.
+#
+# CPCB publishes several agencies' instruments from one campus at the site's
+# nominal coordinate: "Pusa, Delhi - IMD" and "Pusa, Delhi - DPCC" are both live
+# and both at 28.639645, 77.146262 to the metre. They are probably distinct
+# instruments, but for this model a co-located pair does damage either way. It
+# double-weights that site in the city average, and it quietly breaks
+# leave-one-station-out (R7): a held-out station with a perfect twin 0 m away is
+# not being predicted from its neighbours, it is being read off its own twin,
+# and the spatial score flatters itself.
+#
+# The threshold is deliberately tight. It catches the identical-coordinate case,
+# which is unambiguous, and leaves genuinely adjacent sites — NISE Gwal Pahari
+# and TERI Gram are 590 m apart and are two real stations — to be judged by a
+# human, with the distance printed.
+COLOCATED_KM = 0.25
+NEIGHBOUR_NOTE_KM = 2.0
+
+_AGENCY_RE = re.compile(r"[-–]\s*([A-Za-z]+)\s*$")
+
+
+def discover_stations(
+    cfg: Config | None = None,
+    live_within_days: int = LIVE_WITHIN_DAYS,
+    include_configured: bool = False,
+) -> list[dict]:
+    """Official-network PM2.5 stations in the NCR bbox that config does not carry.
+
+    The inverse of `resolve_stations`. That one starts from a hand-written
+    roster and hunts for each entry's OpenAQ id, which needs an approximate
+    coordinate per station and inherits every ambiguity in the name. This starts
+    from what OpenAQ actually serves, so coordinates are the operator-published
+    ones and liveness is a fact rather than a hope.
+
+    Nothing is written. It returns candidates for a human to read, because the
+    judgement calls here — is a college campus on the far side of Meerut part of
+    this airshed? — are not ones a filter should be making alone.
+    """
+    cfg = cfg or load_config()
+    src = cfg.source("cpcb")
+    lat_min, lon_min, lat_max, lon_max = cfg.bbox()
+    headers = {"X-API-Key": _api_key()}
+
+    locations: list[dict] = []
+    page = 1
+    while True:
+        payload = get_json(
+            f"{src['api_url']}/locations",
+            params={
+                "bbox": f"{lon_min},{lat_min},{lon_max},{lat_max}",
+                "limit": 1000,
+                "page": page,
+            },
+            headers=headers,
+        )
+        results = payload.get("results", [])
+        locations.extend(results)
+        if len(results) < 1000:
+            break
+        page += 1
+    log.info("openaq returned %d locations in the NCR bbox", len(locations))
+
+    configured = {s.openaq_id for s in cfg.stations}
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=live_within_days)
+    centre_lat = (lat_min + lat_max) / 2
+    centre_lon = (lon_min + lon_max) / 2
+
+    out: list[dict] = []
+    for loc in locations:
+        if not any(
+            s.get("parameter", {}).get("name") == PARAMETER
+            for s in loc.get("sensors", [])
+        ):
+            continue
+        if not include_configured and int(loc["id"]) in configured:
+            continue
+        provider = (loc.get("provider") or {}).get("name", "")
+        if provider not in OFFICIAL_PROVIDERS:
+            continue
+        first, last = _coverage(loc)
+        if last is None or last < cutoff:
+            continue
+        coords = loc.get("coordinates") or {}
+        if coords.get("latitude") is None:
+            continue
+
+        name = str(loc.get("name", "")).strip()
+        agency = _AGENCY_RE.search(name)
+
+        nearest, nearest_km = None, float("inf")
+        for st in cfg.stations:
+            km = _haversine_km(st.lat, st.lon, coords["latitude"], coords["longitude"])
+            if km < nearest_km:
+                nearest, nearest_km = st, km
+
+        out.append(
+            {
+                "openaq_id": int(loc["id"]),
+                "openaq_name": name,
+                "name": _clean_name(name),
+                "agency": agency.group(1).upper() if agency else "CAAQMS",
+                "provider": provider,
+                "lat": round(float(coords["latitude"]), 6),
+                "lon": round(float(coords["longitude"]), 6),
+                "first": first.date().isoformat() if first else "",
+                "last": last.date().isoformat(),
+                "km_from_centre": round(
+                    _haversine_km(centre_lat, centre_lon, coords["latitude"], coords["longitude"]), 1
+                ),
+                "nearest_configured": nearest.id if nearest else "",
+                "nearest_name": nearest.name if nearest else "",
+                "nearest_km": round(nearest_km, 2) if nearest else None,
+                "colocated": nearest_km < COLOCATED_KM,
+            }
+        )
+    out.sort(key=lambda r: r["km_from_centre"])
+    n_colocated = sum(1 for r in out if r["colocated"])
+    log.info(
+        "%d live official station(s) in the bbox not in config (%d co-located "
+        "with an existing station and excluded by default)",
+        len(out), n_colocated,
+    )
+    return out
+
+
+def _clean_name(openaq_name: str) -> str:
+    """"Talkatora Garden, Delhi - DPCC" -> "Talkatora Garden".
+
+    Config names are the site, not the site plus city plus agency: city and
+    agency already have their own columns, and repeating them makes every log
+    line and axis label longer for no information.
+    """
+    name = _AGENCY_RE.sub("", openaq_name).strip().rstrip("-").strip()
+    return name.split(",")[0].strip() or openaq_name
+
+
+def city_for(record: dict, cfg: Config | None = None) -> str:
+    """Best guess at the city column, from the OpenAQ name."""
+    name = record["openaq_name"]
+    parts = [p.strip() for p in _AGENCY_RE.sub("", name).split(",")]
+    return parts[1] if len(parts) > 1 and parts[1] else "Delhi"
+
+
+def next_station_ids(records: list[dict], cfg: Config | None = None) -> list[str]:
+    """Allocate ids continuing the existing DL/HR/UP/RJ series.
+
+    Ids are stable keys for every Parquet partition already on disk, so they are
+    only ever appended to — never renumbered to make a tidier sequence.
+    """
+    cfg = cfg or load_config()
+    prefix_for = {
+        "delhi": "DL", "new delhi": "DL",
+        "gurugram": "HR", "faridabad": "HR", "sonipat": "HR", "rohtak": "HR",
+        "palwal": "HR", "manesar": "HR", "ballabgarh": "HR", "dharuhera": "HR",
+        "panchgaon": "HR", "bahadurgarh": "HR",
+        "noida": "UP", "greater noida": "UP", "ghaziabad": "UP", "baghpat": "UP",
+        "meerut": "UP", "modinagar": "UP", "khora": "UP", "loni": "UP",
+        "bhiwadi": "RJ", "alwar": "RJ",
+    }
+    counters: dict[str, int] = {}
+    for s in cfg.stations:
+        m = re.match(r"([A-Z]+)(\d+)", s.id)
+        if m:
+            counters[m.group(1)] = max(counters.get(m.group(1), 0), int(m.group(2)))
+
+    ids = []
+    for r in records:
+        city = city_for(r).lower()
+        prefix = prefix_for.get(city, "NC")
+        counters[prefix] = counters.get(prefix, 0) + 1
+        ids.append(f"{prefix}{counters[prefix]:03d}")
+    return ids
+
+
+def emit_new_station_lines(records: list[dict], cfg: Config | None = None) -> str:
+    """TOML lines to append inside the existing `stations = [ ... ]` block.
+
+    Co-located candidates are dropped here rather than earlier so the caller
+    still sees them in the listing and can decide to override.
+    """
+    cfg = cfg or load_config()
+    records = [r for r in records if not r.get("colocated")]
+    ids = next_station_ids(records, cfg=cfg)
+    lines = []
+    for sid, r in zip(ids, records, strict=True):
+        lines.append(
+            f'  {{ id = "{sid}", name = "{r["name"]}", city = "{city_for(r)}", '
+            f'agency = "{r["agency"]}", lat = {r["lat"]}, lon = {r["lon"]}, '
+            f'openaq_id = {r["openaq_id"]} }},'
+        )
+    return "\n".join(lines)
+
+
 def emit_station_toml(records: list[dict], cfg: Config | None = None) -> str:
     """Render a replacement `stations` block using OpenAQ's published coordinates.
 
@@ -354,8 +575,20 @@ def sensor_ids(cfg: Config | None = None, refresh: bool = False) -> dict[str, li
     path = cfg.processed_dir / SENSOR_CACHE
     if path.is_file() and not refresh:
         cached = json.loads(path.read_text(encoding="utf-8"))
-        if cached:
+        # A cache that predates a station is worse than no cache: the live sync
+        # would keep succeeding while quietly never fetching that station, and
+        # the gap looks exactly like a CAAQMS outage (R6). The 2026-08 expansion
+        # hit this — 26 stations backfilled fine and none of them appeared in
+        # the last four days, because those come from the live path.
+        wanted = {s.id for s in cfg.stations if s.resolved}
+        missing = wanted - set(cached)
+        if cached and not missing:
             return {k: list(v) for k, v in cached.items()}
+        if cached:
+            log.info(
+                "sensor cache is missing %d configured station(s) (%s) — refreshing",
+                len(missing), ", ".join(sorted(missing)[:6]),
+            )
 
     src = cfg.source("cpcb")
     headers = {"X-API-Key": _api_key()}
@@ -369,17 +602,27 @@ def sensor_ids(cfg: Config | None = None, refresh: bool = False) -> dict[str, li
             )
         except Exception as exc:
             log.warning("sensor lookup failed for %s: %s", station.id, str(exc)[:120])
+            # Record the attempt with no ids. Leaving the key out entirely would
+            # make the staleness check above see a permanently missing station
+            # and refresh all seventy-odd lookups on every single live sync.
+            # OpenAQ currently answers 500 for Wave City (UP012), which is
+            # exactly that case.
+            mapping.setdefault(station.id, [])
             continue
         ids = [
             s["id"]
             for s in payload.get("results", [])
             if s.get("parameter", {}).get("name") == PARAMETER
         ]
-        if ids:
-            mapping[station.id] = ids
+        mapping[station.id] = ids
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(mapping, indent=1), encoding="utf-8")
-    log.info("cached PM2.5 sensor ids for %d stations", len(mapping))
+    usable = sum(1 for v in mapping.values() if v)
+    log.info(
+        "cached PM2.5 sensor ids for %d of %d stations (%d had none; "
+        "pass refresh=True to retry them)",
+        usable, len(mapping), len(mapping) - usable,
+    )
     return mapping
 
 
@@ -499,6 +742,89 @@ def backfill(
         if not df.is_empty():
             written += write_partitioned(df, dataset)
         cur = stop + dt.timedelta(days=1)
+    return written
+
+
+def backfill_new_stations(
+    start: dt.date | str,
+    end: dt.date | str,
+    cfg: Config | None = None,
+    dataset: str = DATASET,
+    station_ids: list[str] | None = None,
+) -> list[Path]:
+    """Fetch only stations that existing partitions do not carry, and merge them.
+
+    `backfill` skips a chunk whose partitions already exist, so after adding a
+    station to config it would never fetch anything; and re-running with
+    `skip_existing=False` refetches every station for every day, which for a
+    two-year window is tens of thousands of archive files we already hold.
+
+    This fetches the difference. Each day's partition is read, the new stations'
+    rows are concatenated on, and the result is rewritten — `write_partitioned`
+    replaces a partition wholesale, so a merge has to be explicit rather than an
+    append.
+    """
+    cfg = cfg or load_config()
+    start_d, end_d = _as_date(start), _as_date(end)
+
+    if station_ids is None:
+        days = available_dates(dataset)
+        if not days:
+            log.info("%s is empty — use `backfill` for the first load", dataset)
+            return []
+        present: set[str] = set()
+        # Union over several partitions, not just the newest: a station that was
+        # offline on the sample day is present in the dataset and must not be
+        # refetched, and one added to config today is absent from all of them.
+        for day in days[-5:]:
+            present |= set(
+                pl.read_parquet(partition_path(dataset, day), columns=["station_id"])[
+                    "station_id"
+                ].unique().to_list()
+            )
+        station_ids = [s.id for s in cfg.stations if s.id not in present]
+
+    if not station_ids:
+        log.info("%s already carries every configured station", dataset)
+        return []
+
+    by_id = {s.id: s for s in cfg.stations}
+    stations = [by_id[i] for i in station_ids if i in by_id]
+    log.info(
+        "backfilling %d station(s) into %s over %s..%s: %s",
+        len(stations), dataset, start_d, end_d,
+        ", ".join(s.id for s in stations),
+    )
+
+    written: list[Path] = []
+    cur = start_d
+    while cur <= end_d:
+        stop = min(cur + dt.timedelta(days=BACKFILL_CHUNK_DAYS - 1), end_d)
+        log.info("%s (new stations) %s..%s", dataset, cur, stop)
+        fresh = fetch_archive(cur, stop, cfg=cfg, stations=stations)
+        if fresh.is_empty():
+            log.warning("no rows returned for %s..%s", cur, stop)
+            cur = stop + dt.timedelta(days=1)
+            continue
+
+        for day, part in fresh.with_columns(
+            pl.col("time").dt.date().alias("_d")
+        ).group_by("_d", maintain_order=True):
+            day = day[0] if isinstance(day, tuple) else day
+            path = partition_path(dataset, day)
+            part = part.drop("_d")
+            if path.is_file():
+                existing = pl.read_parquet(path)
+                merged = pl.concat([existing, part], how="diagonal_relaxed")
+            else:
+                merged = part
+            # Keep the existing row on a collision. A refetch of a station we
+            # already hold must not quietly replace audited history.
+            merged = merged.unique(subset=["station_id", "time"], keep="first")
+            written += write_partitioned(merged, dataset)
+        cur = stop + dt.timedelta(days=1)
+
+    log.info("merged new stations into %d partition(s) of %s", len(written), dataset)
     return written
 
 
