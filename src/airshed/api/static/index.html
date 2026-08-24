@@ -147,7 +147,22 @@ async function loadStatus() {
     const rows = Object.entries(s.datasets).map(([name, d]) =>
       `<tr><td>${name}</td><td class="num">${(d.days ?? 0).toLocaleString()}</td>
        <td class="num">${d.last ?? "—"}</td></tr>`).join("");
-    $("status").innerHTML =
+    // The run stores are the only datasets that cannot be re-fetched later, so
+    // a stall in them is an alarm and not a staleness note. Everything else
+    // heals by itself on the next backfill.
+    const runAlarms = ["cams_runs", "meteo_runs"].filter(n => {
+      const d = s.datasets[n];
+      return !d || !d.last || (d.age_hours !== null && d.age_hours > 36);
+    });
+    const alarm = runAlarms.length
+      ? `<div class="err" style="margin-bottom:8px">
+           <b>Archive stalled:</b> ${runAlarms.join(", ")} not updated in over 36 h.
+           Archived forecast runs cannot be backfilled — every day missed is lost
+           permanently. Start it with <code>scripts\\run_archive.bat</code>, or check
+           with <code>airshed health</code>.
+         </div>`
+      : "";
+    $("status").innerHTML = alarm +
       `<table><tr><th>dataset</th><th class="num">days</th><th class="num">latest</th></tr>${rows}</table>`;
   } catch (e) { $("synced").textContent = "cache unreachable"; }
 }

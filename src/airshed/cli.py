@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import logging
+import os
 from pathlib import Path
 
 import polars as pl
@@ -18,6 +19,8 @@ from .env import load_dotenv
 from .keepawake import keep_awake
 from .features import build as feat
 from .eval import ablation as ablation_mod
+from .eval import camsoffset as camsoffset_mod
+from .eval import leadmatch as leadmatch_mod
 from .eval import grap_eval
 from .eval import loso as loso_mod
 from .eval import rolling as rolling_mod
@@ -80,6 +83,24 @@ def ingest_meteo(
     _require_range(start, end)
     paths = meteo.backfill(start, end)
     console.print(f"[green]meteo_archive[/] {start}..{end} -> {len(paths)} partition(s)")
+
+
+@ingest_app.command("meteo-leadmatched")
+def ingest_meteo_leadmatched(
+    start: str = typer.Option(...), end: str = typer.Option(...)
+) -> None:
+    """Meteorology at the lead it will actually be used at (Previous Runs API).
+
+    `meteo_archive` holds the best available forecast for each past hour, which
+    is a short-lead one — so a 72 h score computed from it is not a 72 h score.
+    This caches, for each valid hour, the forecast from the run 1, 2 and 3 days
+    earlier. BLH and the pressure-level variables have no such form and are
+    unaffected; see `lead_matched_unavailable` in config.toml.
+    """
+    paths = meteo.backfill_previous_runs(start, end)
+    console.print(
+        f"[green]meteo_leadmatched[/] {start}..{end} -> {len(paths)} partition(s)"
+    )
 
 
 @ingest_app.command("metar")
@@ -182,6 +203,65 @@ def cpcb_resolve(
         console.print("[yellow]dry run — pass --apply to write them into config.toml[/]")
 
 
+@cpcb_app.command("discover")
+def cpcb_discover(
+    live_within_days: int = typer.Option(14, help="Ignore feeds stale longer than this."),
+    emit: str = typer.Option(None, help="Write TOML station lines to this path."),
+) -> None:
+    """Find official-network stations in the NCR bbox that config does not carry.
+
+    The inverse of `resolve-ids`: it starts from what OpenAQ actually serves
+    rather than from a hand-written roster, so coordinates are operator-
+    published and liveness is checked rather than assumed. Writes nothing to
+    config — review the list, then paste the emitted lines in.
+    """
+    logging.getLogger("airshed").setLevel(logging.INFO)
+    records = cpcb.discover_stations(live_within_days=live_within_days)
+    if not records:
+        console.print("[green]nothing new[/] — config already has every live station")
+        return
+
+    keep = [r for r in records if not r.get("colocated")]
+    dropped = [r for r in records if r.get("colocated")]
+    ids = cpcb.next_station_ids(keep)
+
+    table = Table(title=f"{len(keep)} live official station(s) to add")
+    for col in ("proposed id", "name", "city", "km", "first", "last", "nearest", "openaq_id"):
+        table.add_column(col)
+    for sid, r in zip(ids, keep):
+        near = f"{r['nearest_km']:.1f} km {r['nearest_configured']}" if r.get("nearest_km") is not None else ""
+        # Flag anything close enough to share a grid cell, without excluding it:
+        # two real stations can be neighbours, and that is a judgement call.
+        style = "yellow" if (r.get("nearest_km") or 99) < cpcb.NEIGHBOUR_NOTE_KM else None
+        table.add_row(
+            sid, r["name"][:30], cpcb.city_for(r), f"{r['km_from_centre']:.0f}",
+            r["first"], r["last"], near, str(r["openaq_id"]), style=style,
+        )
+    console.print(table)
+
+    if dropped:
+        console.print(
+            f"\n[yellow]{len(dropped)} co-located candidate(s) excluded[/] "
+            f"(within {cpcb.COLOCATED_KM} km of a configured station). A twin at "
+            "zero distance double-weights that site in the city average and "
+            "breaks leave-one-station-out, which would then be reading the "
+            "held-out station off its own duplicate (R7):"
+        )
+        for r in dropped:
+            console.print(
+                f"  {r['openaq_name']} (id {r['openaq_id']}) — "
+                f"{r['nearest_km']:.2f} km from {r['nearest_name']} "
+                f"({r['nearest_configured']})"
+            )
+    console.print(
+        "[yellow]Adding stations changes the evaluation row set[/], so every "
+        "number in docs/results/ becomes non-comparable until regenerated."
+    )
+    if emit:
+        Path(emit).write_text(cpcb.emit_new_station_lines(records), encoding="utf-8")
+        console.print(f"[green]wrote station lines[/] {emit}")
+
+
 @cpcb_app.command("quality")
 def cpcb_quality(start: str = typer.Option(...), end: str = typer.Option(...)) -> None:
     """Flag stations with step changes in level — relocation or instrument swap (R6)."""
@@ -216,6 +296,102 @@ def ingest_expand(
     for name in [dataset] if dataset else list(repair.GRIDDED):
         n = repair.expand(name)
         console.print(f"[green]{name}[/] -> {n} partition(s) expanded")
+
+
+@app.command("health")
+def health() -> None:
+    """Is the forecast-run archive still alive? Exits non-zero if not.
+
+    `status` prints a table and always succeeds, which makes it useless as an
+    alarm. This answers yes or no, and fails loudly, because archived runs
+    cannot be backfilled: a week of silence is a week of episode-season evidence
+    gone for good.
+    """
+    worst = 0
+    stale_after_h = 36
+    now = dt.datetime.now(dt.timezone.utc)
+    for name in ("cams_runs", "meteo_runs"):
+        info = store.coverage(name)
+        if not info.get("last"):
+            console.print(f"[red]{name}: EMPTY[/] — no forecast runs archived at all")
+            worst = 2
+            continue
+        last = dt.date.fromisoformat(str(info["last"]))
+        age_h = max(
+            0.0,
+            (now - dt.datetime.combine(last, dt.time(23, 59), tzinfo=dt.timezone.utc))
+            .total_seconds() / 3600,
+        )
+        if age_h > stale_after_h:
+            console.print(
+                f"[red]{name}: STALE[/] — newest run {info['last']}, "
+                f"{age_h:.0f} h old. Archived runs cannot be backfilled."
+            )
+            worst = max(worst, 2)
+        else:
+            console.print(
+                f"[green]{name}: ok[/] — {info['days']} run(s), "
+                f"newest {info['last']}, {age_h:.0f} h old"
+            )
+
+    if not os.environ.get("AIRSHED_BACKUP_DIR"):
+        console.print(
+            "[yellow]AIRSHED_BACKUP_DIR is not set[/] — the run stores exist on "
+            "this machine only, and cannot be re-fetched (~90 MB/year)."
+        )
+        worst = max(worst, 1)
+    raise typer.Exit(worst)
+
+
+@app.command("camsoffset")
+def run_camsoffset(
+    out: str = typer.Option(None, help="Markdown path; defaults to docs/results/camsoffset.md."),
+) -> None:
+    """Measure the gap between the CAMS we train on and the CAMS we serve.
+
+    Reads only the local run and archive stores, so it costs nothing and can be
+    re-run any time. It gets more informative with every day the daily archive
+    job survives, and with nothing else.
+    """
+    logging.getLogger("airshed").setLevel(logging.INFO)
+    table, ok = camsoffset_mod.run()
+    if table.is_empty():
+        console.print("[yellow]no run/archive overlap yet[/] — run `airshed archive`")
+    else:
+        console.print(table.select(
+            ["lead_day", "rows", "run_days", "archive_mean", "run_mean", "bias", "rmse"]
+        ))
+        console.print(
+            f"settled run days: {ok['settled_days']}/{ok['needed']} needed to fit"
+        )
+    path = camsoffset_mod.write(table, ok, Path(out) if out else None)
+    console.print(f"[green]wrote[/] {path}")
+
+
+@app.command("leadmatch")
+def run_leadmatch(
+    start: str = typer.Option("2025-02-18", help="First date of cached ground truth."),
+    end: str = typer.Option(None, help="Defaults to the last cached CPCB day."),
+    evaluate_on: str = typer.Option("test", help="test or val."),
+    out: str = typer.Option(None, help="Markdown path; defaults to docs/results/leadmatch.md."),
+) -> None:
+    """Re-score with meteorology at real forecast lead, not short lead.
+
+    Answers whether the reported 72 h skill was resting on an input production
+    will never have. Needs `airshed ingest meteo-leadmatched` first.
+    """
+    logging.getLogger("airshed").setLevel(logging.INFO)
+    if end is None:
+        days = store.available_dates("cpcb")
+        if not days:
+            console.print("[red]no cached CPCB data[/]")
+            raise typer.Exit(1)
+        end = days[-1].isoformat()
+
+    table, meta = leadmatch_mod.run(start, end, evaluate_on=evaluate_on)
+    console.print(table.select(["model", "meteorology", "horizon_h", "n", "rmse", "bias"]))
+    path = leadmatch_mod.write(table, meta, Path(out) if out else None)
+    console.print(f"[green]wrote[/] {path}")
 
 
 @app.command("ablation")
@@ -347,6 +523,9 @@ def run_rolling(
     start: str = typer.Option("2025-02-18"),
     end: str = typer.Option(None, help="Defaults to the last cached CPCB day."),
     fresh: bool = typer.Option(False, help="Ignore checkpoints and recompute every fold."),
+    lead_matched: bool = typer.Option(
+        False, help="Add a pass with meteorology at real forecast lead."
+    ),
     out: str = typer.Option(None, help="Markdown path; defaults to docs/results/rolling.md."),
 ) -> None:
     """Rolling-origin evaluation: error bars for every claim.
@@ -360,7 +539,7 @@ def run_rolling(
         end = days[-1].isoformat() if days else None
 
     with keep_awake("rolling-origin evaluation"):
-        table, meta = rolling_mod.run(start, end, resume=not fresh)
+        table, meta = rolling_mod.run(start, end, resume=not fresh, lead_matched=lead_matched)
 
     console.print(pl.DataFrame(meta["per_model"]))
     for row in meta["paired"]:
@@ -381,7 +560,7 @@ def status() -> None:
     table = Table(title="local store")
     for col in ("dataset", "days", "first", "last", "rows"):
         table.add_column(col)
-    for name in ("cams_archive", "cams_runs", "meteo_archive", "meteo_runs", "cpcb", "metar", "fires"):
+    for name in ("cams_archive", "cams_runs", "meteo_archive", "meteo_leadmatched", "meteo_runs", "cpcb", "metar", "fires"):
         c = store.coverage(name)
         table.add_row(name, str(c["days"]), str(c["first"]), str(c["last"]), f"{c['rows']:,}")
     console.print(table)

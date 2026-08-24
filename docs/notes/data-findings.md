@@ -314,3 +314,238 @@ would add roughly 2.3 years and **two more winter episode seasons**, which is
 what the rolling-origin comparisons need to resolve effects of about 1%.
 Earlier years than 2022-11 add nothing to model training, whatever their
 quality, because CAMS does not go back that far.
+
+---
+
+## 12. The archives are short-lead, and only some of it can be undone
+
+Section 3 recorded that archived CAMS is short-lead. The same is true of the
+archived *meteorology*, and it was not flagged: `historical-forecast-api`
+returns the best available forecast for each past hour, which in practice is a
+forecast a few hours old. So the column the model was trained to read as "the
+meteorology 72 hours ahead" was, in training, nothing of the sort.
+
+The fingerprint is in `ablation.md` itself. `full` scores 62.6 / 62.9 / 63.8
+across 24 / 48 / 72 h — essentially flat — and `raw-cams` *improves* with lead,
+95.2 -> 93.1. No forecast improves with lead. Both rows are reading a valid-time
+value, not a forecast at that lead.
+
+### The Previous Runs API fixes part of it
+
+`https://previous-runs-api.open-meteo.com/v1/forecast` serves `<var>_previous_dayN`:
+for a valid hour on day D, the value from the run initialised on day D-N.
+
+**Semantics, verified rather than read off the docs.** Queried for valid hours
+on 2026-08-23 and 2026-08-24 and compared against the runs this repo had already
+archived itself:
+
+| our stored run | valid day | best-matching API series | max diff |
+|---|---|---|---|
+| issued 2026-08-24 | 2026-08-24 (lead 0-23) | `temperature_2m` | **0.000** |
+| issued 2026-08-23 | 2026-08-23 (lead 0-23) | `temperature_2m` | 1.400 |
+| issued 2026-08-23 | 2026-08-24 (lead 24-47) | `temperature_2m_previous_day1` | 1.400 |
+
+The exact zero settles it: `previous_dayN` is indexed on the **valid day**, so
+true lead is `24N + hour_of_day`. Horizon 24 h -> `previous_day1`, 48 h -> day 2,
+72 h -> day 3, and the mapping is deliberately pessimistic — a 72 h horizon is
+scored against a forecast at least 72 hours old, sometimes 95.
+
+Coverage is complete over the whole trainable era: 48/48 non-null at 2025-02-18,
+2025-06-01, 2025-11-05 and 2026-08-20. Backfilled to 553 days, 2,030,616 rows,
+51 stations, zero nulls.
+
+There is **no lag**: `previous_day3` returns 24/24 for *today's* valid hours,
+because the run from three days ago already forecast this far ahead. Only future
+valid days would be short. Checked, because the daily job was briefly written to
+skip four days on the assumption that a lag existed.
+
+### What cannot be lead-matched, and it includes the important one
+
+Not every variable has a `_previous_dayN` form, and the gaps are not random:
+
+| variable | `_previous_dayN` | how it fails |
+|---|---|---|
+| 13 surface variables (temperature, humidity, dew point, pressure, wind 10 m and 100 m, gusts, precipitation, cloud, radiation, CAPE) | yes | — |
+| `boundary_layer_height` | **no** | 0/72 non-null, on `gfs_seamless`, `gfs_global`, `gfs025`, `ecmwf_ifs025`, `icon_seamless` and `best_match` alike |
+| `visibility` | **no** | 0/72 non-null |
+| `temperature_925hPa`, `temperature_850hPa`, `wind_speed_925hPa`, `wind_direction_925hPa`, `geopotential_height_925hPa` | **no** | HTTP 400 — the API rejects `_previous_dayN` on pressure levels outright |
+
+BLH is the single most important variable in the set and the one the whole
+coupling argument rests on, and the derived `inversion`, `lapse_*` and
+`ventilation_index` features inherit the problem. Those columns stay short-lead
+in training. At *serving* time they are genuine long-lead values from the live
+run, so this is a residual train/serve gap that closes only forward, as
+`meteo_runs` accumulates.
+
+CAMS PM2.5 has no archived-forecast endpoint at all (section 3), so the same is
+true of it and more so.
+
+### How much it was worth
+
+`leadmatch.md` has the table. On the single test split the swap costs +1.1% at
+72 h and +2.0% at 48 h, and nothing at 24 h — the right shape, since at 24 h
+lead the two sources are closest. But the effect is the same size as the fires
+and upwind effects this project already refuses to claim from one split, so it
+gets the same treatment: see the `lead-matched meteorology` row in
+`rolling.md` before quoting a number.
+
+Meanwhile the inputs themselves moved a great deal — wind direction RMSE
+86 -> 97 degrees and temperature 1.60 -> 2.32 K between lead day 1 and 3. Large
+input change, small output change, which says the corrector leans on CAMS and
+observation history far more than on the lead-sensitive meteorology. That makes
+short-lead **CAMS** the larger remaining problem, not the meteorology.
+
+---
+
+## 13. The CAMS train/serve gap, measured
+
+Section 3 established that archived CAMS is short-lead. Section 12 fixed the
+equivalent problem for meteorology using the Previous Runs API. **There is no
+such fix for CAMS**, and that was confirmed against both hosts on 2026-08-24:
+
+| probe | result |
+|---|---|
+| `previous-runs-api.open-meteo.com/v1/air-quality` | **HTTP 404** — the host serves weather only |
+| `pm2_5_previous_day1`, `pm2_5_previous_day3` on the air-quality endpoint | **0/48 non-null** |
+
+So the archive cannot be lead-matched, and the only evidence about the gap is
+the overlap between forecast runs we archive ourselves and the archive values
+for the same hours. That accrues one day per successful run of the daily job and
+by no other means.
+
+### What the overlap says so far
+
+`airshed camsoffset` -> `docs/results/camsoffset.md`. On the first two archived
+runs:
+
+| lead day | true lead | rows | run days | archive mean | run mean | bias | RMSE |
+|---|---|---|---|---|---|---|---|
+| 0 | 0-23 h | 2,448 | 2 | 70.0 | 53.9 | **-16.2** | 25.4 |
+| 1 | 24-47 h | 1,224 | 1 | 79.9 | 59.3 | **-20.6** | 22.9 |
+
+Both sides resolve to the same 21 CAMS cells, so this is lead, not geometry.
+The direction is the one that costs: the served input sits *below* the input the
+corrector was fitted against, which pushes the live forecast low.
+
+### Why no correction has been applied
+
+Two run days is two observations, not 2,448. A day's overlap is 51 stations
+across 21 cells under one weather situation; the rows are nowhere near
+independent, and the unit of independence is the run day. Every interval in
+`camsoffset.md` therefore comes from a bootstrap over whole issue dates, and is
+**withheld entirely below five run days** — resampling two days with replacement
+has three possible outcomes and yields something that looks like a tight
+interval while carrying no information. The first draft of that module printed
+"-16.9 to -15.4" from two days, which is exactly the number that would have got
+a bogus correction wired into serving.
+
+A correction is gated at **20 settled run days** (`MIN_RUN_DAYS`), where settled
+means the archive value is at least four days old — a recent archive hour can
+still be revised, and that revision is not what we are trying to measure.
+
+The regime argument matters more than the sample-size one. A bias fitted on
+monsoon air, when Delhi runs at 70 µg/m³, would be applied to a November episode
+at 400. That is the regime where the correction matters most and generalises
+least, so the honest position is to measure the gap, report it on the forecast
+itself, and leave the numbers uncorrected until there is winter data.
+
+### Where it is stated
+
+Not only in this file. `/api/forecast` returns an `input_gap` object with the
+measured bias and the run-day count, the dashboard prints it beside the live
+forecast table, and the daily job logs the count each morning — so a job that
+stops running shows up as a number that stops moving.
+
+---
+
+## 14. The station expansion, 51 -> 77
+
+`airshed cpcb discover` inverts `resolve-ids`: instead of starting from a
+hand-written roster and hunting each entry's OpenAQ id, it reads what OpenAQ
+actually serves in the NCR bbox. Coordinates are operator-published and liveness
+is a fact rather than a hope.
+
+Of **125** PM2.5 locations in the bbox, 51 were already configured and **26** were
+added. The exclusions are the interesting part:
+
+| excluded | count | why |
+|---|---|---|
+| `caaqm`-provider registrations | 27 | **every one is dead** — all end 2018 or 2022. Provider turns out to be a clean signal for the duplicate-registration trap in section 8 |
+| AirGradient, Clarity | 8 | low-cost sensors; CLAUDE.md puts sensor fusion out of scope |
+| AirNow, StateAir | 2 | US diplomatic posts — a different network with its own calibration, and GRAP is defined on the CAAQMS average |
+| dead CPCB registrations | ~10 | ended 2018-2025, or lived only weeks |
+| `Pusa, Delhi - DPCC` | 1 | co-located, see below |
+
+Result: 77 stations — DL 44, UP 17, HR 14, RJ 2 (Rajasthan is new).
+
+### GRAP's city average had no city filter
+
+`build_city_base` averaged **every** configured station. With 51 stations that
+was already 27% non-Delhi (Gurugram, Noida, Ghaziabad, Faridabad); the expansion
+reaches Meerut at 60 km, Bhiwadi at 57 and Dharuhera at 59, which would have put
+Delhi at 53% of its own average.
+
+CAQM invokes GRAP on **Delhi's** AQI, computed by CPCB from Delhi's own
+stations. Averaging in the NCR ring produces a different quantity that looks
+similar, and forecasting it against statutory Delhi thresholds means forecasting
+the wrong number accurately. `grap.city_average_cities` now scopes the
+aggregate; the station model still trains on all 77.
+
+### Co-located stations break leave-one-station-out
+
+`Pusa, Delhi - IMD` (id 5404, configured as DL024) and `Pusa, Delhi - DPCC`
+(id 6356) are both live and sit at 28.639645, 77.146262 — the same point to the
+metre. Two agencies on one campus, most likely.
+
+Including both would double-weight that site in the city average and, worse,
+hand leave-one-station-out a perfect twin: a held-out station predicted from a
+copy of itself is not measuring spatial skill (R7). `COLOCATED_KM = 0.25`
+excludes it. The threshold is tight on purpose — NISE Gwal Pahari and TERI Gram
+are 590 m apart and are two genuinely different stations, so anything under 2 km
+is flagged for a human rather than dropped.
+
+### `expand-stations` is right for CAMS and wrong for meteorology
+
+`repair.expand` copies a cell-mate's rows and needs no network. Whether that is
+correct depends entirely on the grid:
+
+| dataset | cell size | furthest new station from a served cell | verdict |
+|---|---|---|---|
+| `cams_archive` | ~0.4 deg | 0.364 deg (MIET Meerut) | inside one cell — copying is what a fresh request would return |
+| `meteo_archive` | ~0.11 deg | **0.444 deg** (MIET Meerut) | **four cells out**; copying would have assigned weather from ~49 km away |
+
+Meteorology was refetched properly for the new stations. Nothing would have
+complained if it had not been.
+
+### Three caches that did not notice config had grown
+
+Each one succeeded while quietly doing less than it claimed:
+
+1. **`sensor_ids()`** returned its cached map wholesale. All 26 stations
+   backfilled correctly and then appeared *absent* from the last four days,
+   because those come from the live API path — and under R6 an absent station is
+   indistinguishable from a CAAQMS outage. `resolve_cells` had guarded against
+   this since Phase 1; `sensor_ids` had not.
+2. **The fix then caused a refresh storm.** OpenAQ answers HTTP 500 for Wave
+   City's sensors endpoint, so it stayed permanently "missing" and triggered a
+   full 76-station relookup — 120 seconds — on every live sync. A failed lookup
+   now records an empty entry, so it counts as attempted.
+3. **`backfill_previous_runs`** skipped every chunk whose partitions existed, so
+   it would have fetched nothing at all for a station added later.
+
+### What exhausted the API quota
+
+`fetch_previous_runs` resolves the cell map itself, and `backfill_previous_runs`
+calls it once per chunk. With 10-day chunks over 553 days that is **56 redundant
+cell-resolution requests** on top of the real ones, which spent Open-Meteo's
+daily allowance and stalled `meteo_leadmatched` at 2026-02-12.
+
+The map is now resolved once per backfill. A daily-quota 429 also raises
+`net.DailyQuotaExceeded` and is no longer retried with exponential backoff:
+"come back tomorrow" and "slow down" are the same status code and want opposite
+handling, and backing off five times against a spent allowance only makes the
+failure slower.
+
+**Outstanding:** `meteo_leadmatched` covers 2025-02-18..2026-02-12 for all 77
+stations and 2026-02-13 onward for the original 51. Run
+`scripts/finish_station_expansion.py` after the allowance resets.

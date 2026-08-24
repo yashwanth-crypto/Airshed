@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 import httpx
+from urllib.parse import urlsplit
 from tenacity import (
     retry,
     retry_if_exception_type,
@@ -23,6 +24,16 @@ USER_AGENT = "airshed/0.1 (SIH26082 research prototype)"
 DEFAULT_TIMEOUT = httpx.Timeout(60.0, connect=20.0)
 
 RETRYABLE = (httpx.TransportError, httpx.HTTPStatusError)
+
+# Phrases a provider uses when the 429 means "come back tomorrow" rather than
+# "slow down". The two need different handling and look identical by status
+# code: backing off five times over a minute against a spent daily quota just
+# turns a clear failure into a slow one.
+_DAILY_QUOTA_MARKERS = ("daily api request limit", "daily limit", "try again tomorrow")
+
+
+class DailyQuotaExceeded(Exception):
+    """The provider's daily allowance is gone. Not retryable today."""
 
 
 class RateLimiter:
@@ -78,6 +89,11 @@ def get(
     _limiter_for(url).wait()
     hdrs = {"User-Agent": USER_AGENT, **(headers or {})}
     resp = httpx.get(url, params=params, headers=hdrs, timeout=timeout or DEFAULT_TIMEOUT)
+    if resp.status_code == 429 and _is_daily_quota(resp):
+        raise DailyQuotaExceeded(
+            f"daily API quota exhausted at {urlsplit(url).netloc}: "
+            f"{resp.text[:200]}"
+        )
     if resp.status_code == 429 or resp.status_code >= 500:
         log.warning("retryable %s from %s", resp.status_code, url)
         resp.raise_for_status()
@@ -86,6 +102,14 @@ def get(
             f"{resp.status_code} from {url}: {resp.text[:300]}"
         )
     return resp
+
+
+def _is_daily_quota(resp: httpx.Response) -> bool:
+    try:
+        body = resp.text.lower()
+    except Exception:
+        return False
+    return any(marker in body for marker in _DAILY_QUOTA_MARKERS)
 
 
 def get_json(

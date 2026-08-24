@@ -28,8 +28,8 @@ truth exists.
   doc files. Identity is set at repo level to `yashwanth-crypto
   <nadhahari44@gmail.com>` per `CLAUDE.md`. **`data/` is gitignored** and
   verified excluded, as are `.env` and both API keys.
-- Secrets in `.env` (gitignored): `OPENAQ_API_KEY` is set and working.
-  `FIRMS_MAP_KEY` is **not** set.
+- Secrets in `.env` (gitignored): `OPENAQ_API_KEY` and `FIRMS_MAP_KEY` are
+  both set and working.
 - Set `PYTHONIOENCODING=utf-8` before CLI calls or the Windows console mangles
   the output tables.
 
@@ -39,14 +39,20 @@ truth exists.
 
 | dataset | days | range | rows |
 |---|---|---|---|
-| `cpcb` | 2551 | 2014-12-31 -> 2026-08-24 | 1,375,507 |
+| `cpcb` | 2551 | 2014-12-31 -> 2026-08-24 | 1,537,930 |
 | `cpcb_upwind` | 537 | 2025-02-18 -> 2026-08-19 | 195,188 |
-| `cams_archive` | 739 | 2024-06-01 -> 2026-08-24 | 904,536 |
-| `meteo_archive` | 709 | 2024-09-15 -> 2026-08-24 | 864,744 |
-| `metar` | 739 | 2024-06-01 -> 2026-08-24 | 18,894 |
-| `cams_runs` | **1** | 2026-08-23 | 6,120 |
-| `meteo_runs` | **1** | 2026-08-23 | 6,120 |
+| `cams_archive` | 739 | 2024-06-01 -> 2026-08-24 | 1,365,672 |
+| `meteo_archive` | 709 | 2024-09-15 -> 2026-08-24 | 1,209,816 |
+| `meteo_leadmatched` | 553 | 2025-02-18 -> 2026-08-24 | 2,704,536 |
+| `metar` | 739 | 2024-06-01 -> 2026-08-24 | 18,904 |
 | `fires` | 274 | 2025-09-15 -> 2026-08-23 | 23,544 |
+| `cams_runs` | **2** | 2026-08-23 -> 2026-08-24 | 12,240 |
+| `meteo_runs` | **2** | 2026-08-23 -> 2026-08-24 | 12,240 |
+
+**Station count is 77 as of 2026-08-24** (was 51). Every dataset above carries
+all 77 except `meteo_leadmatched`, which has them to 2026-02-12 and the original
+51 thereafter — the backfill hit Open-Meteo's daily quota. Finish it with
+`scripts/finish_station_expansion.py`.
 
 **The `cpcb` row is misleading on its own.** It spans 2015-2026 only because
 the Kaggle archive (2015-2020) was loaded. The **trainable** period is the
@@ -59,8 +65,9 @@ onward** — see `docs/notes/data-findings.md` section 11 for the era table.
 
 **Phase 1 — data spine.** Gate met. `airshed gate` rebuilds a week of every
 feature with sockets physically blocked, so "reads from cache" is verified, not
-claimed. 51 NCR stations resolved to OpenAQ ids with authoritative coordinates,
-plus 24 upwind corridor stations held separately.
+claimed. **77** NCR stations resolved to OpenAQ ids with authoritative coordinates
+(51 until the 2026-08-24 expansion), plus 24 upwind corridor stations held
+separately. See `data-findings.md` section 14.
 
 **Phase 2 — baseline and ablation.** Gate met. `airshed ablation` writes
 `docs/results/ablation.md`: persistence, persistence-daily, raw CAMS, scaled
@@ -94,10 +101,23 @@ when stale.
 - **Upwind airshed network** — 24 monitors 65-340 km up the Punjab corridor.
 - **Daily archive job** (`scripts/daily_archive.py`) — archives runs, syncs
   live observations, tops up the archives.
+- **Lead-matched meteorology** (`airshed ingest meteo-leadmatched`,
+  `airshed leadmatch`) — training meteorology at the lead it is actually used
+  at, from the Open-Meteo Previous Runs API, instead of the short-lead archive
+  value. See `docs/results/leadmatch.md` and `data-findings.md` section 12.
 
 ---
 
 ## Headline numbers (all from held-out data)
+
+> **STALE as of 2026-08-24.** Every number below and every file in
+> `docs/results/` was computed on **51** stations. The network is now **77**, so
+> the evaluation row set has changed and these are not comparable to a rerun —
+> the GRAP city average in particular is now scoped to Delhi's 44 stations
+> rather than all of them, which is a correction, not a tweak. Finish
+> `scripts/finish_station_expansion.py`, then regenerate `ablation`, `rolling
+> --lead-matched`, `leadmatch`, `grap` and `loso` before quoting anything.
+
 
 | claim | value | evidence |
 |---|---|---|
@@ -111,6 +131,11 @@ when stale.
 | Fog alarm recall | 91% (vs 84% weather-only) | `coupling.md` |
 
 Negative and null results, reported as such:
+- **Lead-matched meteorology costs about 1%** (-0.9% +/- 1.0%, worse on 4/5
+  folds). Training meteorology was short-lead, so the horizon columns above were
+  mildly optimistic. The direction is consistent, the magnitude is inside the
+  fold scatter, and the headline claim is unaffected: the correction still beats
+  both baselines on every fold with either input. `leadmatch.md`, `rolling.md`.
 - **Coupled multi-output: no measurable effect** (+0.8% +/- 1.2%, 3/5 folds).
 - **Upwind corridor: no measurable effect** (+0.5% +/- 1.0%, 4/5 folds), though
   the gain does concentrate on wind-aligned hours (+1.0% vs -0.4%).
@@ -135,35 +160,45 @@ That is the pattern for all three additions — fires, upwind corridor, coupling
 Each is small, each is smaller than its own fold-to-fold spread, and the fix is
 **more winters, not more features**. See `POSITIONING.md` section 5.
 
-### 2. Confirm the archive keeps running (verify by the log)
-The job is proven and idempotent; `cams_runs` and `meteo_runs` hold runs for
-2026-08-23 and 2026-08-24.
+### 2. Keep the archive running — hardened 2026-08-24
+This is the highest-priority standing item, because everything below is blocked
+on it and it is the only item with a deadline. Stubble season starts within
+weeks; archived forecast runs cannot be recovered afterwards.
 
-**It runs at logon, via the Startup folder** — not Task Scheduler. A shortcut to
-`scripts/run_archive.bat` lives in
-`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`, starting
-minimised. On a laptop this is more reliable than a fixed 06:30 trigger, which
-only fires if the machine happens to be awake at that moment.
+**It now runs as a resident loop, not once per logon.** `scripts/run_archive.bat`
+(shortcut in `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`,
+minimised) starts `daily_archive.py --loop`, which re-checks every 30 minutes.
+The check is a question about *state* — "is today's run in the store yet?" — not
+about the clock, so sleep, hibernation and a closed lid cannot make it miss.
+The previous run-once launcher archived nothing at all on a laptop left on for
+four days.
 
-Windows Task Scheduler was tried first and abandoned. It refused to launch with:
+- A lock file (`data/archive.lock`) stops a second copy; a lock older than
+  90 minutes is taken over, so a process killed by a closed lid cannot block the
+  archive permanently.
+- The loop swallows and logs a failing pass rather than dying on it.
+- Windows Task Scheduler was tried first and refused this account outright
+  (`LogonType=InteractiveToken` rejecting a Microsoft-account session). `S4U`
+  would fix it; the loop is simpler and needs no elevation.
 
-    Task Scheduler did not launch task "\Airshed-Archive" because user
-    "<domain>\<user>" was not logged on when the launching conditions were met.
+**Off-machine backup — set this.** `AIRSHED_BACKUP_DIR` mirrors `cams_runs` and
+`meteo_runs` after every successful pass. They are the only datasets here that
+cannot be re-fetched, and they are **~250 KB/day, about 90 MB/year**. Currently
+**unset**, which means one disk failure in December costs the whole winter. It
+is opt-in by design — copying into a synced folder sends the data off the
+machine, which is the operator's call — but it should be made.
 
-That is `LogonType=InteractiveToken` rejecting the session, common on machines
-signed in with a Microsoft account. `LogonType=S4U` would fix it if anyone wants
-Task Scheduler back, but the Startup route is simpler and needs no elevation.
+**Checking it.** Never trust a launcher's own report; `schtasks /run` printed
+"SUCCESS: Attempted" three times while nothing ran.
 
-**Check it by the log, never by the launcher's own report.** `schtasks /run`
-printed "SUCCESS: Attempted" three times while nothing ran at all. The truth is
-a fresh timestamp in `data/archive.log`:
+    airshed health                          # yes/no, exits non-zero
+    Get-Content C:\SIH\datarchive.log -Tail 5
 
-    Get-Content C:\SIH\datarchive.log -Tail 3
-
-Why it matters: archived forecast runs cannot be recovered retrospectively.
-Every day the job does not run is a day of true 72 h forecast history lost, and
-that archive is what will eventually let us report an honest 72 h number
-instead of one measured with short-lead CAMS.
+`airshed health` fails with exit 2 when a run store is stale (>36 h) or empty,
+and exit 1 when there is no off-machine backup. The dashboard shows a red
+"Archive stalled" banner on the same condition, and the daily pass logs the
+CAMS-offset run count, so a stalled job also shows up as a number that stops
+moving.
 
 ### 3. More winters of ground truth
 The single binding constraint. One winter cannot resolve a 1% effect, which is
@@ -177,7 +212,53 @@ why both the coupling and upwind verdicts are "cannot tell".
 - Kaggle archive (2015-2020) is **already loaded** but cannot train: no CAMS or
   meteorology reaches back that far.
 
-### 5. Smaller, all unblocked
+### 4. Close the CAMS train/serve gap — now the larger of the two
+The lead-matched work settled the meteorology half. What it also showed is that
+the corrector barely leans on the lead-sensitive meteorology at all: the inputs
+moved a great deal between lead day 1 and 3 (wind direction RMSE 86 -> 97
+degrees, temperature 1.60 -> 2.32 K) while the model moved about a percent. Its
+skill comes from CAMS and observation history, so **the remaining optimism sits
+almost entirely in short-lead CAMS**.
+
+**It cannot be backfilled.** Confirmed against both hosts: the previous-runs API
+has no air-quality path (404) and `pm2_5_previous_dayN` is empty on the
+air-quality endpoint. There is no archived-forecast air-quality product.
+
+**Measurement is built and running.** `airshed camsoffset` ->
+`docs/results/camsoffset.md`, re-measured by the daily job, surfaced on
+`/api/forecast` as `input_gap` and printed beside the live forecast in the UI.
+Current state, on the first two archived runs:
+
+| lead day | archive mean | run mean | bias | RMSE |
+|---|---|---|---|---|
+| 0 (0-23 h) | 70.0 | 53.9 | **-16.2** | 25.4 |
+| 1 (24-47 h) | 79.9 | 59.3 | **-20.6** | 22.9 |
+
+Same 21 cells on both sides, so it is lead and not geometry, and the direction
+is the one that costs — the live forecast is being handed an input below what it
+was fitted against and will run low.
+
+**No correction is applied, deliberately.** Gated at 20 settled run days. Two
+days is two observations, not 2,448 — the rows within a day share one weather
+situation, so intervals come from a bootstrap over whole run days and are
+withheld below five. More importantly a bias fitted on monsoon air at 70 ug/m3
+would be applied to a November episode at 400. See `data-findings.md` section 13.
+
+**What actually moves this forward:** the daily job surviving, and a winter in
+the run store. Nothing else does.
+
+### 5. Finish the station expansion, then regenerate everything
+`meteo_leadmatched` is short from 2026-02-13 onward for the 26 new stations;
+`scripts/finish_station_expansion.py` completes it in one pass once Open-Meteo's
+daily allowance resets. Then rerun the five results commands — until that
+happens `docs/results/` describes a 51-station network that no longer exists.
+
+Expect the numbers to move for reasons that are nothing to do with modelling:
+26 more stations, many of them peripheral and several with only months of
+history, plus a GRAP city average that is now Delhi-only. Report the station-set
+change alongside the new numbers, not just the new numbers.
+
+### 6. Smaller, all unblocked
 - Hyperparameter search (never tuned; `DEFAULT_PARAMS` throughout).
 - 45 more NCR stations (51 of 96 in the official roster) — improves the weakest
   layer, needs only the OpenAQ key we already have.
@@ -222,16 +303,19 @@ Each was a silent failure: no exception, plausible-looking output.
       ingest/     cams meteo cpcb metar fires kaggle_history repair openmeteo _stationmatch
       features/   build splits upwind live
       models/     base baselines corrector coupled calibrate graph surface
-      eval/       metrics ablation rolling loso visibility grap_eval
+      eval/       metrics ablation rolling leadmatch camsoffset loso visibility grap_eval
       api/        app service static/index.html
       grap.py attribution.py store.py config.py net.py env.py verify.py keepawake.py
-    docs/results/   ablation rolling loso grap coupling (+ csv, png)
+    docs/results/   ablation rolling leadmatch camsoffset loso grap coupling (+ csv, png)
     docs/notes/     data-findings.md   <- every measured constraint, with evidence
 
-Key commands: `airshed status | gate | ablation | rolling | grap | loso |
-coupling | features | episodes | archive`, and
-`airshed ingest cams|meteo|cpcb|upwind|live|history|metar|fires|expand-stations`.
+Key commands: `airshed status | health | gate | ablation | rolling | leadmatch |
+camsoffset | grap | loso | coupling | features | episodes | archive`, and `airshed ingest
+cams|meteo|meteo-leadmatched|cpcb|upwind|live|history|metar|fires|expand-stations`.
+
+`airshed rolling --lead-matched` adds the paired fold comparison against
+short-lead meteorology.
 
 Demo: `.venv/Scripts/python.exe -m uvicorn airshed.api.app:app --port 8018`
 
-**109 tests pass.**
+**167 tests pass.**
