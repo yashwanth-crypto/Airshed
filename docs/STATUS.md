@@ -24,8 +24,10 @@ truth exists.
 
 - Python 3.11 via `uv`; venv at `.venv`. Run things as
   `.venv/Scripts/python.exe -m airshed.cli ...`.
-- **`data/` is not under version control and the repo is not a git repo yet.**
-  `git init` has not been run. Nothing has ever been committed.
+- Git repo initialised; first commit `f5890f2` holds all 83 source, test and
+  doc files. Identity is set at repo level to `yashwanth-crypto
+  <nadhahari44@gmail.com>` per `CLAUDE.md`. **`data/` is gitignored** and
+  verified excluded, as are `.env` and both API keys.
 - Secrets in `.env` (gitignored): `OPENAQ_API_KEY` is set and working.
   `FIRMS_MAP_KEY` is **not** set.
 - Set `PYTHONIOENCODING=utf-8` before CLI calls or the Windows console mangles
@@ -133,12 +135,37 @@ That is the pattern for all three additions — fires, upwind corridor, coupling
 Each is small, each is smaller than its own fold-to-fold spread, and the fix is
 **more winters, not more features**. See `POSITIONING.md` section 5.
 
-### 2. Schedule the daily archive (one command)
-`cams_runs` holds **1 day**. Every day it does not run is a day of true
-archived-forecast history lost, and that archive is what will eventually let us
-report an honest 72 h number instead of one measured with short-lead CAMS.
+### 2. Confirm the daily archive is actually running
+`cams_runs` and `meteo_runs` hold 2 runs each (2026-08-23, 2026-08-24); the job
+itself is proven and idempotent. What is not yet proven is that it runs
+*unattended*.
 
-    schtasks /create /tn Airshed-Archive /tr "C:\SIH\.venv\Scripts\python.exe C:\SIH\scripts\daily_archive.py" /sc daily /st 06:30
+Windows Task Scheduler refused to launch it with the error:
+
+    Task Scheduler did not launch task "\Airshed-Archive" because user
+    "<domain>\<user>" was not logged on when the launching conditions were met.
+
+That is `LogonType=InteractiveToken` being unhappy with the session, which is
+common on machines signed in with a Microsoft account. Two fixes, either is fine:
+
+- switch the principal to S4U (runs logged on or not, no stored password):
+
+      $p = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType S4U -RunLevel Limited
+      Set-ScheduledTask -TaskName "Airshed-Archive" -Principal $p
+
+- or skip Task Scheduler: put a shortcut to `scripts/run_archive.bat` in
+  `shell:startup` so it runs at every logon. On a laptop this is arguably more
+  reliable than a fixed 06:30 trigger.
+
+Check it worked with `Get-ScheduledTaskInfo -TaskName "Airshed-Archive"`
+(`LastTaskResult 0`) or by looking for a fresh timestamp in
+`data/archive.log`. **Verify by the log, not by the task reporting success** —
+`schtasks /run` reports "Attempted" even when nothing runs at all.
+
+Why it matters: archived forecast runs cannot be recovered retrospectively.
+Every day the job does not run is a day of true 72 h forecast history lost, and
+that archive is what will eventually let us report an honest 72 h number
+instead of one measured with short-lead CAMS.
 
 ### 3. More winters of ground truth
 The single binding constraint. One winter cannot resolve a 1% effect, which is
@@ -151,10 +178,6 @@ why both the coupling and upwind verdicts are "cannot tell".
   not the hourly station model.
 - Kaggle archive (2015-2020) is **already loaded** but cannot train: no CAMS or
   meteorology reaches back that far.
-
-### 4. git init and first commit
-Nothing is under version control. Per `CLAUDE.md`: author `yashwanth-crypto`,
-no co-author trailers, no tool attribution, never commit `data/`.
 
 ### 5. Smaller, all unblocked
 - Hyperparameter search (never tuned; `DEFAULT_PARAMS` throughout).
