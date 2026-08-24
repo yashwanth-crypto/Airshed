@@ -330,7 +330,65 @@ class Service:
             "stale": age_h > 12,
             "horizons": by_horizon,
             "drivers": self._live_drivers(sup),
+            "input_gap": self._input_gap(),
         }
+
+    def _input_gap(self) -> dict:
+        """State the CAMS train/serve gap on the forecast itself.
+
+        The model is trained on `cams_archive` and served `cams_runs`, and the
+        two are not the same field. That is a real caveat on every number above,
+        so it travels with them rather than living only in a results document.
+        Measured from cache; never blocks the forecast.
+
+        Cached for the day. The measurement scans the whole run/archive overlap,
+        which is trivial at two run days and is not at four hundred — and it can
+        only change when the daily job adds a run, so recomputing it per request
+        would buy nothing.
+        """
+        from ..eval import camsoffset
+
+        today = dt.date.today()
+        if getattr(self, "_gap_day", None) == today:
+            return self._gap_cache
+
+        try:
+            table, ok = camsoffset.run(self.cfg)
+        except Exception as exc:  # a caveat must never take the forecast down
+            log.warning("input gap unavailable: %s", str(exc)[:200])
+            # Not cached: a transient failure should be retried, not pinned for
+            # the rest of the day.
+            return {"measured": False, "reason": "measurement failed"}
+
+        if table.is_empty():
+            gap = {
+                "measured": False,
+                "reason": "no run/archive overlap cached yet",
+                "corrected": False,
+            }
+        else:
+            worst = table.sort("bias").row(0, named=True)
+            gap = {
+                "measured": True,
+                "corrected": False,
+                "run_days": ok["run_days"],
+                "settled_days": ok["settled_days"],
+                "run_days_needed": ok["needed"],
+                "worst_lead_day": int(worst["lead_day"]),
+                "worst_bias_ugm3": _round(float(worst["bias"])),
+                "note": (
+                    "Trained on archived CAMS, served live CAMS. The served input "
+                    f"runs {abs(float(worst['bias'])):.0f} ug/m3 "
+                    f"{'below' if worst['bias'] < 0 else 'above'} the trained input "
+                    f"at lead day {int(worst['lead_day'])}, on "
+                    f"{ok['run_days']} run day(s) — too few to correct for "
+                    f"({ok['needed']} needed), so the forecast is uncorrected. "
+                    "See docs/results/camsoffset.md."
+                ),
+            }
+        self._gap_day = today
+        self._gap_cache = gap
+        return gap
 
     def _live_drivers(self, sup: pl.DataFrame) -> list[dict]:
         try:

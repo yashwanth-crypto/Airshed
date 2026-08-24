@@ -200,10 +200,26 @@ async function loadLive() {
     $("live").innerHTML =
       `<table><tr><th>lead</th><th class="num">city PM2.5 (10–90%)</th><th>GRAP</th></tr>${rows}</table>`;
     const age = d.issued_age_hours;
+    // The CAMS train/serve gap is a standing caveat on every number in this
+    // table, so it is shown next to them rather than left in a results file.
+    const gap = d.input_gap;
+    let gapNote = "";
+    if (gap && gap.measured && !gap.corrected) {
+      gapNote =
+        ` <span class="err">Uncorrected input gap:</span> trained on archived CAMS, ` +
+        `served live CAMS, which runs <b>${Math.abs(gap.worst_bias_ugm3).toFixed(0)} µg/m³ ` +
+        `${gap.worst_bias_ugm3 < 0 ? "low" : "high"}</b> at lead day ${gap.worst_lead_day} ` +
+        `on ${gap.run_days} run day${gap.run_days === 1 ? "" : "s"} ` +
+        `(${gap.run_days_needed} needed before correcting). These values are likely ` +
+        `${gap.worst_bias_ugm3 < 0 ? "under" : "over"}-forecast by roughly that much.`;
+    } else if (gap && !gap.measured) {
+      gapNote = ` <span class="muted">Input gap not yet measurable: ${gap.reason}.</span>`;
+    }
     $("liveNote").innerHTML =
       `Issued from observations to <b>${new Date(d.issued).toISOString().slice(0,16).replace("T"," ")} UTC</b> ` +
       `(<span class="${d.stale ? "err" : ""}">${age} h ago</span>). ` +
-      (d.stale ? "Run <code>airshed ingest live</code> and <code>airshed archive</code> to refresh." : "");
+      (d.stale ? "Run <code>airshed ingest live</code> and <code>airshed archive</code> to refresh." : "") +
+      gapNote;
   } catch (e) {
     $("live").innerHTML = `<span class="err">${e.message}</span>`;
     $("liveNote").textContent = "Needs an archived run and recent observations: airshed archive, then airshed ingest live.";
