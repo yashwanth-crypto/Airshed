@@ -30,6 +30,7 @@ import logging
 import math
 import os
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -45,6 +46,21 @@ log = logging.getLogger(__name__)
 DATASET = "cpcb"
 UPWIND_DATASET = "cpcb_upwind"
 PARAMETER = "pm25"
+
+# One archive object per station-day, so a transient network failure costs a
+# station-day rather than a request. Retried, because it used to cost a whole
+# day silently.
+ARCHIVE_RETRIES = 3
+
+# A day where this share of station fetches failed outright is not written. A
+# partition that exists is treated as cached and complete by every later
+# backfill, so writing a crippled one turns a transient outage into permanent
+# data loss.
+MAX_FETCH_FAILURE_RATE = 0.25
+
+# Distinct from None. None means "asked, nothing there" (R6 gap); this means
+# "could not ask", which is a retryable condition and not a gap.
+FETCH_FAILED = "fetch-failed"
 
 # Physically implausible values seen in CAAQMS feeds. Flagged, never deleted
 # silently, and never repaired by interpolation.
@@ -87,13 +103,24 @@ def fetch_archive(
         for day in _days(start_d, end_d)
     ]
     frames: list[pl.DataFrame] = []
+    failed = 0
     with httpx.Client(
         timeout=httpx.Timeout(60.0, connect=20.0), headers={"User-Agent": USER_AGENT}
     ) as client:
         with ThreadPoolExecutor(max_workers=ARCHIVE_WORKERS) as pool:
             for df in pool.map(lambda job: _fetch_day(client, base, *job), jobs):
-                if df is not None and not df.is_empty():
+                if df is FETCH_FAILED:
+                    failed += 1
+                elif df is not None and not df.is_empty():
                     frames.append(df)
+
+    rate = failed / len(jobs) if jobs else 0.0
+    if failed:
+        log.warning(
+            "%d of %d station-day fetches failed (%.0f%%) for %s..%s",
+            failed, len(jobs), 100 * rate, start_d, end_d,
+        )
+    fetch_archive.last_failure_rate = rate
 
     if not frames:
         log.warning("archive returned nothing for %s..%s", start_d, end_d)
@@ -111,13 +138,31 @@ def _fetch_day(
         f"/year={day.year}/month={day.month:02d}"
         f"/location-{station.openaq_id}-{day:%Y%m%d}.csv.gz"
     )
-    try:
-        resp = client.get(f"{base}/{key}")
-    except httpx.HTTPError as exc:  # network blip on one day is not fatal
-        log.warning("archive fetch failed %s %s: %s", station.id, day, exc)
-        return None
+    # Retry transport failures before giving up. Without this a single SSL
+    # handshake timeout produced a hole indistinguishable from a station being
+    # offline, and nine consecutive days of January 2026 were lost that way.
+    resp = None
+    for attempt in range(ARCHIVE_RETRIES):
+        try:
+            resp = client.get(f"{base}/{key}")
+            break
+        except httpx.HTTPError as exc:
+            if attempt == ARCHIVE_RETRIES - 1:
+                log.warning(
+                    "archive fetch failed %s %s after %d attempts: %s",
+                    station.id, day, ARCHIVE_RETRIES, exc,
+                )
+                # FETCH_FAILED, not None: the caller has to be able to tell
+                # "we could not ask" from "we asked and there was nothing".
+                # Conflating them is exactly the R6 trap.
+                return FETCH_FAILED
+            time.sleep(1.5 * (attempt + 1))
+
     if resp.status_code == 404:
         return None  # station offline that day — a real gap, left as a gap (R6)
+    if resp.status_code >= 500:
+        log.warning("archive %s %s -> HTTP %s", station.id, day, resp.status_code)
+        return FETCH_FAILED
     if resp.status_code != 200:
         log.warning("archive %s %s -> HTTP %s", station.id, day, resp.status_code)
         return None
@@ -739,7 +784,18 @@ def backfill(
             continue
         log.info("%s %s..%s", dataset, cur, stop)
         df = fetch_archive(cur, stop, cfg=cfg, stations=stations)
-        if not df.is_empty():
+        rate = getattr(fetch_archive, "last_failure_rate", 0.0)
+        if rate > MAX_FETCH_FAILURE_RATE:
+            # Refuse to write. A partition that exists is treated as cached and
+            # complete by every later run, so persisting a crippled day converts
+            # a transient network problem into permanent, invisible data loss --
+            # which then reads as a CPCB outage rather than as our failure (R6).
+            log.error(
+                "%s %s..%s: %.0f%% of fetches failed, above the %.0f%% limit -- "
+                "NOT writing. Re-run this range when the network is healthy.",
+                dataset, cur, stop, 100 * rate, 100 * MAX_FETCH_FAILURE_RATE,
+            )
+        elif not df.is_empty():
             written += write_partitioned(df, dataset)
         cur = stop + dt.timedelta(days=1)
     return written

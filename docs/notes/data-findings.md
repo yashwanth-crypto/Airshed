@@ -549,3 +549,59 @@ failure slower.
 **Outstanding:** `meteo_leadmatched` covers 2025-02-18..2026-02-12 for all 77
 stations and 2026-02-13 onward for the original 51. Run
 `scripts/finish_station_expansion.py` after the allowance resets.
+
+---
+
+## 15. There is a nine-day hole in the winter ground truth, and it is upstream
+
+`cpcb` is missing 11 partitions across the trainable era:
+
+| range | days |
+|---|---|
+| 2025-04-10 | 1 |
+| **2026-01-11 .. 2026-01-19** | **9** |
+| 2026-06-24 | 1 |
+
+The nine-day run sits **inside the winter test block**, so every winter number
+this project reports is computed on a January with nine days absent.
+
+### It is not our failure, and that was checked both ways
+
+The first suspicion was our own fetcher, because a probe returned an SSL
+handshake timeout. That turned out to be an unrelated intermittent fault against
+the S3 host. With retries in place the backfill reported a **0% fetch-failure
+rate** and still returned nothing, and a direct probe is unambiguous:
+
+| date | DL001 | DL002 | DL006 |
+|---|---|---|---|
+| 2026-01-09 | 200 | 200 | 200 |
+| 2026-01-10 | 200 | 200 | 200 |
+| **2026-01-11** | **404** | **404** | **404** |
+| **2026-01-15** | **404** | **404** | **404** |
+| **2026-01-19** | **404** | **404** | **404** |
+| 2026-01-20 | 200 | 200 | 200 |
+
+The v3 API agrees, and it is a separate backend: 48 rows for 2026-01-08..10,
+**0 rows** for 2026-01-11..14, 28 rows for 2026-01-20..22. Both of OpenAQ's
+paths have nothing, so the data does not exist upstream and **cannot be
+recovered from any source this project has**. Treat it as a permanent gap, not a
+to-do.
+
+### What the investigation did fix
+
+Two real defects in the fetch path, neither of which caused this gap but either
+of which could have manufactured one:
+
+1. **A transport failure was indistinguishable from a 404.** Both returned
+   `None`, so "we could not ask" and "we asked and the station was offline" were
+   the same value — precisely the confusion R6 exists to prevent. There is now a
+   `FETCH_FAILED` sentinel, and transport failures are retried three times
+   before being reported.
+2. **A partially-failed day was written anyway.** Because a partition that
+   exists is treated as cached and complete by every later backfill, persisting
+   a crippled day converted a transient network problem into permanent invisible
+   data loss. `backfill` now refuses to write a range where more than
+   `MAX_FETCH_FAILURE_RATE` (25%) of station-day fetches failed, and says so
+   loudly, so the range is retried later instead of being silently sealed.
+
+Covered by `tests/test_archive_gaps.py`.
