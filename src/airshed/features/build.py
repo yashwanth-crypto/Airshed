@@ -507,14 +507,17 @@ def _scope_to_city(base: pl.DataFrame, cfg: Config) -> pl.DataFrame:
         )
         return base
 
-    wanted = {c.strip().lower() for c in cities}
-    keep = [s.id for s in cfg.stations if s.city.strip().lower() in wanted]
+    # Shared with the GRAP report rather than reimplemented, so the model and
+    # the document that describes it cannot end up scoping differently.
+    from ..grap import city_average_stations
+
+    keep = city_average_stations(cfg)
     if not keep:
         log.warning("no configured station matches grap.city_average_cities=%s", cities)
         return base.clear()
     log.info(
         "city average scoped to %d of %d stations (%s)",
-        len(keep), len(cfg.stations), ", ".join(sorted(wanted)),
+        len(keep), len(cfg.stations), ", ".join(cities),
     )
     return base.filter(pl.col("station_id").is_in(keep))
 

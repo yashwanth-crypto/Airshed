@@ -229,3 +229,19 @@ def observed_stage(pm25_24h: np.ndarray, cfg: Config | None = None) -> np.ndarra
     aqi = frame.select(pm25_to_aqi(pl.col("c"), cfg).alias("aqi"))
     stage = aqi.select(aqi_to_stage(pl.col("aqi"), cfg).alias("s"))["s"]
     return stage.to_numpy()
+
+
+def city_average_stations(cfg: Config | None = None) -> list[str]:
+    """Station ids that define the statutory city average.
+
+    Single source of truth for the scoping, shared by `features.build` (which
+    applies it) and the GRAP report (which has to state it). Two places deciding
+    what "Delhi's average" means is how the report and the model end up
+    describing different quantities.
+    """
+    cfg = cfg or load_config()
+    cities = cfg.raw.get("grap", {}).get("city_average_cities")
+    if not cities:
+        return [s.id for s in cfg.stations]
+    wanted = {c.strip().lower() for c in cities}
+    return [s.id for s in cfg.stations if s.city.strip().lower() in wanted]

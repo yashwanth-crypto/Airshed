@@ -30,6 +30,8 @@ Two baselines make the number interpretable:
 from __future__ import annotations
 
 import logging
+import pathlib
+import re
 
 import numpy as np
 import polars as pl
@@ -142,6 +144,30 @@ def _nearest_km(station_id: str, cfg: Config) -> float:
     return round(min(graph.distance_between(target, s) for s in others), 1)
 
 
+def _temporal_rmse(path=None):
+    """The station model's overall RMSE, read from the current ablation table.
+
+    Cross-referencing another generated document is slightly awkward, but the
+    alternative is a number typed once that quietly becomes wrong -- which is
+    what happened here when the network went from 51 to 77 stations. Returns
+    None if the ablation has not been generated, and the sentence adapts.
+    """
+    path = path or pathlib.Path("docs/results/ablation.md")
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8")
+    except OSError:
+        return None
+    # The "full" row of the RMSE-by-horizon table; last column is overall.
+    m = re.search(r"^\| full \|(.+)\|\s*$", text, re.M)
+    if not m:
+        return None
+    cells = [c.strip() for c in m.group(1).split("|") if c.strip()]
+    try:
+        return float(cells[-1])
+    except (ValueError, IndexError):
+        return None
+
+
 def to_markdown(table: pl.DataFrame, meta: dict) -> str:
     lines = [
         "# Leave-one-station-out — Phase 4\n",
@@ -207,11 +233,19 @@ def to_markdown(table: pl.DataFrame, meta: dict) -> str:
         )
 
     scale = table["observed_mean"].mean()
+    # The comparison figure is read out of the current ablation, not typed in.
+    # It was hardcoded at 64 µg/m³ and went stale the moment the network grew.
+    temporal = _temporal_rmse()
+    gap = (
+        f"well behind the temporal model, which reaches {temporal:.0f} µg/m³ RMSE "
+        if temporal is not None
+        else "well behind the temporal model, which has "
+    )
     lines.append(
         f"\n## How good is this, really\n\n"
         f"Mean error of {meta['mean_rmse_graph']:.0f} µg/m³ against an observed "
         f"mean of {scale:.0f} µg/m³ is a large relative error — spatial skill is "
-        "well behind the temporal model, which reaches 64 µg/m³ RMSE *with* the "
+        f"{gap}*with* the "
         "station's own history available. That gap is the honest measure of how "
         "much a monitor is worth. The surface is good enough to say which part "
         "of the city is worse on a given morning; it is not good enough to "

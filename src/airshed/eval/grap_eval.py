@@ -118,6 +118,10 @@ def run(
                 (test["y"].to_numpy() >= pred.q10) & (test["y"].to_numpy() <= pred.q90)
             )
         ),
+        # Counted from config so the prose cannot drift from the network. The
+        # gap between these two is the point: GRAP is Delhi's number, not NCR's.
+        "city_stations": len(grap.city_average_stations(cfg)),
+        "total_stations": len(cfg.stations),
     }
     return table, lead, meta
 
@@ -210,6 +214,29 @@ def lead_times(
     return pl.DataFrame(rows)
 
 
+def _monotonicity_note(table) -> str:
+    """Explain non-monotone recall using this run's own Stage III numbers."""
+    text = (
+        "\nRecall is not monotone in horizon, and that is a property of the "
+        "decision rule rather than of skill. The threshold is a fixed "
+        "probability and intervals widen with lead time, so a longer-lead "
+        "forecast crosses its threshold more readily than a short-lead one."
+    )
+    sev = table.filter(pl.col("stage") == 3).sort("horizon_h")
+    if sev.height >= 2:
+        a, b = sev.row(0, named=True), sev.row(-1, named=True)
+        text += (
+            f" Stage III moves from {a['recall']:.0%} recall at "
+            f"{int(a['horizon_h'])} h to {b['recall']:.0%} at "
+            f"{int(b['horizon_h'])} h, while precision goes "
+            f"{a['precision']:.0%} to {b['precision']:.0%}."
+        )
+    return text + (
+        " Read the two columns together: a longer horizon is not seeing "
+        "further, it is guessing more freely.\n"
+    )
+
+
 def to_markdown(table: pl.DataFrame, lead: pl.DataFrame, meta: dict, cfg=None) -> str:
     cfg = cfg or load_config()
     names = {s.stage: s.name for s in cfg.grap_stages}
@@ -221,9 +248,16 @@ def to_markdown(table: pl.DataFrame, lead: pl.DataFrame, meta: dict, cfg=None) -
         f"{meta['test_rows']:,} ({meta['test_span']})\n"
         f"- city 24 h RMSE {meta['rmse_city']:.1f} µg/m³, "
         f"interval coverage {meta['coverage']:.1%}\n",
-        "\nGRAP is invoked on the city-wide average AQI, so the city series is "
-        "modelled directly rather than aggregated from 51 correlated station "
-        "forecasts after the fact.\n",
+        # Station counts are read from config, never typed in. The network went
+        # 51 -> 77 in August 2026, and a hardcoded count would leave this
+        # paragraph describing a system that no longer exists.
+        f"\nGRAP is invoked on **Delhi's** city-wide average AQI, so the city "
+        f"series is modelled directly from the {meta['city_stations']} Delhi "
+        f"stations rather than aggregated from {meta['total_stations']} "
+        f"correlated station forecasts after the fact. CAQM keys GRAP to "
+        f"Delhi's own AQI, so averaging in the wider NCR ring would compute a "
+        f"different quantity and then compare it against statutory Delhi "
+        f"thresholds.\n",
         "\n## Stage thresholds\n",
         "| stage | name | AQI | 24 h PM2.5 (µg/m³) | decision threshold |",
         "|---|---|---|---|---|",
@@ -257,15 +291,10 @@ def to_markdown(table: pl.DataFrame, lead: pl.DataFrame, meta: dict, cfg=None) -
             f"{row['n_actual']} | {recall} | {prec} | {row['false_alarm_rate']:.1%} |"
         )
 
-    lines.append(
-        "\nRecall is not monotone in horizon, and that is a property of the "
-        "decision rule rather than of skill. The threshold is a fixed "
-        "probability, and intervals widen with lead time, so a 72 h forecast "
-        "crosses `p ≥ 0.25` more readily than a 24 h one — Stage III recall "
-        "rises to 82% at 72 h while precision falls to 41%. Read the two "
-        "columns together: the longer horizon is not seeing further, it is "
-        "guessing more freely.\n"
-    )
+    # Illustrated with this run's own Stage III figures rather than numbers
+    # restated from a previous one. A sentence that contradicts the table
+    # directly above it is worse than having no sentence at all.
+    lines.append(_monotonicity_note(table))
 
     lines.append("\n## Lead time on severe stages\n")
     lines.append(

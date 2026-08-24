@@ -583,7 +583,7 @@ def _coupling_section(table: pl.DataFrame, horizons: list[int]) -> str:
             "visibility head does not measurably improve PM2.5 accuracy. The "
             "most likely reason is in the data, not the architecture: observed "
             "visibility comes from a single airport (VIDP) and is broadcast to "
-            "all 51 stations, so it carries one city-wide signal that the "
+            "every station, so it carries one city-wide signal that the "
             "meteorology already supplies. Report it as a negative result and "
             "do not claim coupling as a benefit until a second visibility "
             "source or a genuinely per-station second series exists."
