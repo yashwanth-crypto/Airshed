@@ -110,25 +110,29 @@ when stale.
 
 ## Headline numbers (all from held-out data)
 
-> **STALE as of 2026-08-24.** Every number below and every file in
-> `docs/results/` was computed on **51** stations. The network is now **77**, so
-> the evaluation row set has changed and these are not comparable to a rerun —
-> the GRAP city average in particular is now scoped to Delhi's 44 stations
-> rather than all of them, which is a correction, not a tweak. Finish
-> `scripts/finish_station_expansion.py`, then regenerate `ablation`, `rolling
-> --lead-matched`, `leadmatch`, `grap` and `loso` before quoting anything.
+> **Regenerated at 77 stations on 2026-08-24.** `ablation`, `grap`, `loso` and
+> `coupling` are current. **`rolling.md` and `leadmatch.md` are still 51-station**
+> and cannot be rerun until `meteo_leadmatched` is complete — that is waiting on
+> Open-Meteo's daily quota and the archive loop heals it automatically.
+>
+> Read the absolute numbers with care: the network gained 26 mostly peripheral,
+> cleaner stations, so the holdout's observed mean fell 127.4 -> 115.9 ug/m3 and
+> episode hours 12.1% -> 9.5%. **The test set got easier.** Skill against the
+> baselines is the comparable quantity, not raw RMSE.
 
 
 | claim | value | evidence |
 |---|---|---|
-| vs raw CAMS | **+29.0%** RMSE, 5/5 folds | `rolling.md` |
-| vs persistence | **+19.7%** RMSE, 5/5 folds | `rolling.md` |
-| Interval coverage | 77.8% (target 80%) | `ablation.md` |
-| GRAP Stage III | 82% caught, 72 h median lead | `grap.md` |
-| Spatial (leave-one-station-out) | 82.6 ug/m3 | `loso.md` |
-| Visibility from pollution | **+9.5%**, +8.9% in polluted air | `coupling.md` |
-| Raw GFS visibility | 21.3 km RMSE — blind to haze | `coupling.md` |
-| Fog alarm recall | 91% (vs 84% weather-only) | `coupling.md` |
+| vs raw CAMS | **+34.1% to +36.3%** by horizon | `ablation.md` (77 stn) |
+| vs persistence | **+24.6% to +32.3%** by horizon | `ablation.md` (77 stn) |
+| vs raw CAMS, 5 folds | +29.6%, 5/5 | `rolling.md` (51 stn, stale) |
+| vs persistence, 5 folds | +20.5%, 5/5 | `rolling.md` (51 stn, stale) |
+| Interval coverage, city model | **85.1%** (target 80%) | `grap.md` |
+| GRAP Stage III @ 72 h | **73.8%** recall, 66.0% precision | `grap.md` |
+| GRAP Stage III lead | caught at all for 88.3%, 72 h median | `grap.md` |
+| Spatial (leave-one-station-out) | **81.8 ug/m3** over 6 stations | `loso.md` |
+| Visibility from pollution | +9.5%, gain concentrated in polluted air | `coupling.md` |
+| CAMS train/serve gap | -20.6 ug/m3 at lead day 1, 2 run days | `camsoffset.md` |
 
 Negative and null results, reported as such:
 - **Lead-matched meteorology costs about 1%** (-0.9% +/- 1.0%, worse on 4/5

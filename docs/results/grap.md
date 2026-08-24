@@ -2,11 +2,11 @@
 
 Probability that each GRAP stage is reached, from the predicted distribution of Delhi's city-wide 24-hour PM2.5.
 
-- trained on 25,826 city-hours, tested on 4,557 (2025-12-12 to 2026-06-30)
-- city 24 h RMSE 26.3 µg/m³, interval coverage 72.3%
+- trained on 26,548 city-hours, tested on 4,719 (2025-12-12 to 2026-06-30)
+- city 24 h RMSE 26.5 µg/m³, interval coverage 85.1%
 
 
-GRAP is invoked on the city-wide average AQI, so the city series is modelled directly rather than aggregated from 51 correlated station forecasts after the fact.
+GRAP is invoked on **Delhi's** city-wide average AQI, so the city series is modelled directly from the 44 Delhi stations rather than aggregated from 77 correlated station forecasts after the fact. CAQM keys GRAP to Delhi's own AQI, so averaging in the wider NCR ring would compute a different quantity and then compare it against statutory Delhi thresholds.
 
 
 ## Stage thresholds
@@ -27,20 +27,20 @@ Recall is the share of hours that really reached the stage and were called. Over
 
 | horizon | stage | actual hours | recall | precision | false alarm rate |
 |---|---|---|---|---|---|
-| 24 h | 1 Poor | 814 | 100.0% | 95.3% | 6.1% |
-| 24 h | 2 Very Poor | 670 | 96.9% | 84.1% | 15.3% |
-| 24 h | 3 Severe | 133 | 72.9% | 54.5% | 6.0% |
-| 24 h | 4 Severe Plus | 18 | 16.7% | 60.0% | 0.1% |
-| 48 h | 1 Poor | 838 | 100.0% | 95.9% | 5.3% |
-| 48 h | 2 Very Poor | 679 | 100.0% | 81.3% | 18.5% |
-| 48 h | 3 Severe | 133 | 65.4% | 46.8% | 7.1% |
-| 48 h | 4 Severe Plus | 18 | 61.1% | 68.8% | 0.3% |
-| 72 h | 1 Poor | 856 | 100.0% | 96.6% | 4.2% |
-| 72 h | 2 Very Poor | 697 | 98.3% | 82.1% | 17.2% |
-| 72 h | 3 Severe | 133 | 82.0% | 40.8% | 11.0% |
-| 72 h | 4 Severe Plus | 18 | 38.9% | 31.8% | 1.0% |
+| 24 h | 1 Poor | 814 | 99.6% | 98.5% | 1.7% |
+| 24 h | 2 Very Poor | 668 | 96.9% | 85.1% | 13.2% |
+| 24 h | 3 Severe | 145 | 81.4% | 52.2% | 7.8% |
+| 24 h | 4 Severe Plus | 17 | 100.0% | 25.4% | 3.3% |
+| 48 h | 1 Poor | 838 | 100.0% | 97.1% | 3.4% |
+| 48 h | 2 Very Poor | 668 | 97.6% | 80.7% | 17.2% |
+| 48 h | 3 Severe | 145 | 80.0% | 52.0% | 7.5% |
+| 48 h | 4 Severe Plus | 17 | 88.2% | 46.9% | 1.1% |
+| 72 h | 1 Poor | 856 | 100.0% | 97.5% | 2.9% |
+| 72 h | 2 Very Poor | 684 | 97.5% | 83.3% | 14.4% |
+| 72 h | 3 Severe | 145 | 73.8% | 66.0% | 3.7% |
+| 72 h | 4 Severe Plus | 17 | 52.9% | 69.2% | 0.2% |
 
-Recall is not monotone in horizon, and that is a property of the decision rule rather than of skill. The threshold is a fixed probability, and intervals widen with lead time, so a 72 h forecast crosses `p ≥ 0.25` more readily than a 24 h one — Stage III recall rises to 82% at 72 h while precision falls to 41%. Read the two columns together: the longer horizon is not seeing further, it is guessing more freely.
+Recall is not monotone in horizon, and that is a property of the decision rule rather than of skill. The threshold is a fixed probability and intervals widen with lead time, so a longer-lead forecast crosses its threshold more readily than a short-lead one. Stage III moves from 81% recall at 24 h to 74% at 72 h, while precision goes 52% to 66%. Read the two columns together: a longer horizon is not seeing further, it is guessing more freely.
 
 
 ## Lead time on severe stages
@@ -50,6 +50,6 @@ The longest unbroken horizon at which the stage was already being called. A stag
 | stage | events | caught at all | median lead | caught at 72 h |
 |---|---|---|---|---|
 | 1 Poor | 856 | 100.0% | 72 h | 100.0% |
-| 2 Very Poor | 697 | 100.0% | 72 h | 98.3% |
-| 3 Severe | 133 | 82.0% | 72 h | 82.0% |
-| 4 Severe Plus | 18 | 61.1% | 48 h | 38.9% |
+| 2 Very Poor | 684 | 100.0% | 72 h | 97.5% |
+| 3 Severe | 145 | 88.3% | 72 h | 73.8% |
+| 4 Severe Plus | 17 | 100.0% | 72 h | 52.9% |
