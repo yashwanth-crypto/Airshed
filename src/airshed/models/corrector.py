@@ -80,6 +80,7 @@ class CorrectorModel(Model):
         name: str | None = None,
         anchor_col: str = "cams_pm2_5_tgt",
         drop_prefixes: tuple[str, ...] = (),
+        quantiles: tuple[float, ...] = QUANTILES,
     ) -> None:
         self.use_obs_history = use_obs_history
         self.use_meteo = use_meteo
@@ -92,6 +93,12 @@ class CorrectorModel(Model):
         # variant so an ablation can attribute a gain to one kind of
         # information rather than to "more columns helped".
         self.drop_prefixes = tuple(drop_prefixes)
+        # Fitting fewer heads is for search only: a hyperparameter trial ranks
+        # on the median and paying for three heads to refine a number it does
+        # not rank on triples the cost of the sweep. Anything served must keep
+        # all three -- every model in this project returns an interval, not a
+        # point (see models/base.py).
+        self.quantiles = tuple(quantiles)
         self.params = {**DEFAULT_PARAMS, **(params or {})}
         self.num_rounds = num_rounds
         if name:
@@ -143,7 +150,7 @@ class CorrectorModel(Model):
                 continue
             dataset_x = matrix[usable]
             dataset_y = residual[usable]
-            for q in QUANTILES:
+            for q in self.quantiles:
                 booster = lgb.train(
                     {**self.params, "alpha": q},
                     lgb.Dataset(dataset_x, label=dataset_y, feature_name=self._features),
@@ -162,6 +169,7 @@ class CorrectorModel(Model):
         matrix = self._matrix(X)
         horizons = X["horizon_h"].to_numpy()
         out = {q: np.full(len(cams), np.nan) for q in QUANTILES}
+        # A head that was never fitted falls back to the anchor below.
 
         for h in np.unique(horizons):
             sel = horizons == h

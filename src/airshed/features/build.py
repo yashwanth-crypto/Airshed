@@ -562,6 +562,7 @@ def build_city_base(
     cfg: Config | None = None,
     min_stations: int = 5,
     min_coverage: float = 0.0,
+    stations: list[str] | None = None,
 ) -> pl.DataFrame:
     """Collapse the station frame to the city-wide series GRAP is keyed to.
 
@@ -585,10 +586,19 @@ def build_city_base(
     if base.is_empty():
         return base
 
-    base = _scope_to_city(base, cfg)
-    if base.is_empty():
-        log.warning("no stations left after scoping to the GRAP city average")
-        return base
+    if stations is not None:
+        # An explicit basket overrides the GRAP scoping. Used by the coupling
+        # experiment, where the question is which stations best describe the
+        # air at one airport, not which ones the policy is keyed to.
+        base = base.filter(pl.col("station_id").is_in(stations))
+        if base.is_empty():
+            log.warning("explicit station basket matched no rows")
+            return base
+    else:
+        base = _scope_to_city(base, cfg)
+        if base.is_empty():
+            log.warning("no stations left after scoping to the GRAP city average")
+            return base
     base = _require_coverage(base, min_coverage)
 
     numeric = [
