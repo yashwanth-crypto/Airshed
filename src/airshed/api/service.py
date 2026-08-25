@@ -483,7 +483,21 @@ class Service:
     REPLAY_SOURCES = ("cpcb", "cams_archive", "meteo_archive")
 
     def _split_of(self, day) -> str:
-        """train / val / test for a replayed date, read from the split config."""
+        """How the model relates to this date: unseen / test / val / train.
+
+        The split blocks alone are not enough. Anything outside a test or val
+        block used to be reported as "train", which is wrong for any date after
+        the training cutoff -- those rows did not exist when the model was
+        fitted. Replaying one is the strongest evidence available, a forecast
+        made before the data existed, and it was being labelled the weakest.
+        """
+        trained_through = self._trained_through
+        if trained_through is None and self.model_path.is_file():
+            self.model()  # populates _trained_through from the cached payload
+            trained_through = self._trained_through
+        if trained_through and day > dt.date.fromisoformat(str(trained_through)):
+            return "unseen"
+
         cfg = self.cfg.raw.get("split", {})
         for name, key in (("test", "test_blocks"), ("val", "val_blocks")):
             for block in cfg.get(key, []) or []:

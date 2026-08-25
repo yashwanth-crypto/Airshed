@@ -368,13 +368,15 @@ async function runReplay() {
     // State the split. "Held out" is the difference between evidence and an
     // illustration, and a judge should not have to ask.
     const sp = data.split;
-    const splitTag = sp === "test"
-      ? ` <b style="color:var(--accent)">Held-out day</b> — never seen in training.`
-      : sp === "val"
-        ? ` <b>Validation day</b> — used for calibration, not for training.`
-        : sp
-          ? ` <span class="err">Training day</span> — illustrative, not evidence.`
-          : "";
+    const splitTag = sp === "unseen"
+      ? ` <b style="color:var(--accent)">After the training cutoff</b> — this data did not exist when the model was fitted.`
+      : sp === "test"
+        ? ` <b style="color:var(--accent)">Held-out day</b> — never seen in training.`
+        : sp === "val"
+          ? ` <b>Validation day</b> — used for calibration, not for training.`
+          : sp
+            ? ` <span class="caveat">Training day</span> — illustrative, not evidence.`
+            : "";
     const lm = s.lead_matched_share;
     const prov = lm === null || lm === undefined
       ? ""
