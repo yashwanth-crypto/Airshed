@@ -372,6 +372,31 @@ def is_due() -> bool:
     return False
 
 
+# Hours of observations to re-pull on each tick. Short: the point is to stay
+# current, and the daily pass already reaches back far enough to heal gaps.
+# Re-fetching four days every half hour would be 8x the requests for the same
+# result.
+SYNC_WINDOW_H = 12
+
+
+def sync_observations() -> None:
+    """Top up recent CPCB observations. Cheap, and runs on every loop tick.
+
+    Separate from `one_pass` on purpose. The forecast run is archived once a
+    day and cannot be backfilled; observations arrive continuously and the
+    interface shows their age, so they are worth keeping current between runs.
+    """
+    log = logging.getLogger("archive")
+    try:
+        paths = cpcb.sync_recent(hours=SYNC_WINDOW_H)
+        if paths:
+            log.info("observations: refreshed %d partition(s)", len(paths))
+    except DailyQuotaExceeded as exc:
+        log.warning("observation sync deferred — %s", str(exc)[:160])
+    except Exception as exc:
+        log.error("observation sync failed: %s", str(exc)[:300])
+
+
 def loop() -> int:
     log = logging.getLogger("archive")
     if not acquire_lock():
@@ -386,7 +411,12 @@ def loop() -> int:
                 if is_due():
                     one_pass()
                 else:
-                    log.debug("nothing due")
+                    # Observations refresh on every tick, not only when a
+                    # forecast run is due. `is_due` asks about the run stores,
+                    # so once the day's run was archived the loop slept and
+                    # ground truth went stale for the rest of the day -- the
+                    # dashboard sat ~9 h behind when upstream was only ~5.
+                    sync_observations()
             except Exception as exc:
                 # A loop that dies on one bad night is a loop that was not worth
                 # writing. Log it and try again on the next tick.
