@@ -39,9 +39,26 @@ the split we tuned on.
 **It is not free.** A fit goes from 33 s to 78 s on 1.07M rows, so every
 ablation and rolling regeneration now costs roughly 2.4x more.
 
-**The number above is validation.** The honest figure is whatever the
-regenerated ablation reports on the held-out test split, which was never seen by
-this search.
+**The number above is validation. The test split declined it.**
+
+| split | defaults (31) | tuned (255) |
+|---|---|---|
+| validation @72 h | 69.592 | **68.204** (+2.0%) |
+| **test, overall** | **60.4** | 60.6 (**-0.3%**) |
+| test @24 h | 60.0 | 60.7 |
+| test @72 h | 60.8 | 61.4 |
+
+Adopted, regenerated the ablation, and reverted. The gain was specific to the
+split it was chosen on -- the ordinary failure mode of hyperparameter search,
+and exactly why the test blocks are held separate. A 0.2 ug/m3 difference is
+also inside the noise this project refuses to read anything into elsewhere, so
+there is no evidence the change helps and a measured 2.4x cost per fit (33 s to
+78 s on 1.07M rows) on every regeneration.
+
+**The result worth keeping is the null one.** Twenty-four configurations across
+a 12,288-point space could not beat the defaults on held-out data. The model was
+never badly mistuned, which is the question this search existed to answer, and
+that is a stronger statement than a +2% that evaporated.
 
 **Worth adopting: +2.0% on validation at 72 h.** Apply it to `DEFAULT_PARAMS` as a deliberate edit, then regenerate the ablation so the reported numbers come from the tuned model. The gain above is a validation figure and will differ on test.
 

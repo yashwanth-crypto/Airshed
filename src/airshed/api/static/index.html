@@ -181,8 +181,11 @@ async function loadDays() {
       `(${d.limited_by} lags; observations run to ${d.observations_to})</span>`;
   }
   // Default to a November episode if the cache covers one.
-  const nov = `${new Date(d.last).getFullYear() - (new Date(d.last).getMonth() < 10 ? 1 : 0)}-11-12`;
-  el.value = (nov >= d.first && nov <= d.last) ? nov : d.last;
+  // Open on a held-out episode, chosen by the API from the split config. The
+  // old default was a November date that sits in the *training* blocks, so the
+  // headline demo was in-sample and did not say so.
+  el.value = (d.demo_date && d.demo_date >= d.first && d.demo_date <= d.last)
+    ? d.demo_date : d.last;
 }
 
 // ---------------------------------------------------------------- live
@@ -350,6 +353,16 @@ async function runReplay() {
     // short-lead archive values flatters live behaviour, so the share of rows
     // using the forecast genuinely available at issue time belongs next to the
     // score rather than in a results file.
+    // State the split. "Held out" is the difference between evidence and an
+    // illustration, and a judge should not have to ask.
+    const sp = data.split;
+    const splitTag = sp === "test"
+      ? ` <b style="color:var(--accent)">Held-out day</b> — never seen in training.`
+      : sp === "val"
+        ? ` <b>Validation day</b> — used for calibration, not for training.`
+        : sp
+          ? ` <span class="err">Training day</span> — illustrative, not evidence.`
+          : "";
     const lm = s.lead_matched_share;
     const prov = lm === null || lm === undefined
       ? ""
@@ -360,7 +373,7 @@ async function runReplay() {
     $("skill").innerHTML =
       `Issued ${horizon} h ahead · ${s.n ?? 0} station-hours · ` +
       `model RMSE <b>${fmt(s.rmse_model,1)}</b> µg/m³ vs raw CAMS <b>${fmt(s.rmse_cams,1)}</b> · ` +
-      `observed mean ${fmt(s.observed_mean)} µg/m³.` + prov;
+      `observed mean ${fmt(s.observed_mean)} µg/m³.` + splitTag + prov;
     $("msg").textContent = "";
     const noon = data.city_series?.[Math.floor((data.city_series.length||1)/2)]?.time;
     if (noon) loadSurface(noon);

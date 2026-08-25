@@ -28,6 +28,7 @@ from ..models import surface as surface_mod
 from ..models.calibrate import CalibratedModel
 from ..models.corrector import CorrectorModel
 from ..store import available_dates, coverage
+from ..store import read_range as read_range_fn
 
 log = logging.getLogger(__name__)
 
@@ -187,6 +188,10 @@ class Service:
         return {
             "date": target_date,
             "horizon_h": horizon,
+            # Which split this date falls in. A replay of a training day is an
+            # illustration; a replay of a held-out day is evidence, and the
+            # difference belongs on screen rather than being assumed.
+            "split": self._split_of(day),
             "city_series": [
                 {
                     "time": row["target_time"].isoformat(),
@@ -477,6 +482,19 @@ class Service:
     #: "no forecasts landing on that day" after the user has already clicked.
     REPLAY_SOURCES = ("cpcb", "cams_archive", "meteo_archive")
 
+    def _split_of(self, day) -> str:
+        """train / val / test for a replayed date, read from the split config."""
+        cfg = self.cfg.raw.get("split", {})
+        for name, key in (("test", "test_blocks"), ("val", "val_blocks")):
+            for block in cfg.get(key, []) or []:
+                if (
+                    dt.date.fromisoformat(block["start"])
+                    <= day
+                    <= dt.date.fromisoformat(block["end"])
+                ):
+                    return name
+        return "train"
+
     def available_days(self) -> dict:
         """The range replay can actually serve — the intersection, not the union.
 
@@ -496,13 +514,62 @@ class Service:
         first = max(v[0] for v in per_source.values())
         last = min(v[1] for v in per_source.values())
         cpcb_days = available_dates("cpcb")
+        demo_day, demo_why = self._demo_day(first, last)
         return {
             "first": first.isoformat(),
             "last": last.isoformat(),
             "count": max((last - first).days + 1, 0),
             "limited_by": min(per_source, key=lambda k: per_source[k][1]),
             "observations_to": cpcb_days[-1].isoformat() if cpcb_days else None,
+            # The day the interface opens on. It must be a *held-out* episode:
+            # the picker used to default to a November date that sits in the
+            # training blocks, so the headline demo was showing in-sample
+            # performance without saying so.
+            "demo_date": demo_day,
+            "demo_reason": demo_why,
         }
+
+    def _demo_day(self, first, last) -> tuple[str | None, str]:
+        """The dirtiest day inside a test block that replay can actually serve.
+
+        Cached: it scans a couple of months of observations and only changes
+        when the split blocks or the data do.
+        """
+        if getattr(self, "_demo_cache", None):
+            return self._demo_cache
+        blocks = self.cfg.raw.get("split", {}).get("test_blocks", []) or []
+        best, best_mean = None, -1.0
+        for block in blocks:
+            lo = max(dt.date.fromisoformat(block["start"]), first)
+            hi = min(dt.date.fromisoformat(block["end"]), last)
+            if lo > hi:
+                continue
+            obs = read_range_fn("cpcb", lo, hi)
+            if obs.is_empty():
+                continue
+            daily = (
+                obs.filter(pl.col("pm25_clean").is_not_null())
+                .with_columns(pl.col("time").dt.date().alias("day"))
+                .group_by("day")
+                .agg(
+                    pl.col("pm25_clean").mean().alias("mean_pm25"),
+                    pl.col("station_id").n_unique().alias("stations"),
+                )
+                # A thin day makes a poor demo and a poor average alike.
+                .filter(pl.col("stations") >= 40)
+            )
+            for row in daily.iter_rows(named=True):
+                if row["mean_pm25"] > best_mean:
+                    best, best_mean = row["day"], row["mean_pm25"]
+        if best is None:
+            self._demo_cache = (None, "no held-out day available")
+            return self._demo_cache
+        self._demo_cache = (
+            best.isoformat(),
+            f"dirtiest held-out day ({best_mean:.0f} ug/m3 city mean) — "
+            "never seen in training",
+        )
+        return self._demo_cache
 
 
 def target_or(day) -> str:
