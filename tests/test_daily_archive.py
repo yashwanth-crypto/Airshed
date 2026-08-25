@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import datetime as dt
 import importlib.util
+import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -183,3 +185,87 @@ def test_a_stale_lock_is_taken_over_not_obeyed(lock_path):
 def test_an_unreadable_lock_is_taken_over(lock_path):
     lock_path.write_text("not a timestamp", encoding="utf-8")
     assert da.acquire_lock() is True
+
+
+def test_the_lock_records_the_pid_that_holds_it(lock_path):
+    """A timestamp alone cannot tell a running loop from a dead one."""
+    assert da.acquire_lock() is True
+    age_min, pid = da._read_lock()
+    assert pid == os.getpid()
+    assert age_min < 1
+
+
+def test_a_fresh_lock_from_a_dead_process_is_taken_over_at_once(lock_path):
+    """The failure this exists to stop: a killed loop blocking every relaunch.
+
+    It happened twice in two days. The age rule alone waits 90 minutes before
+    it will call a lock stale, so a loop killed at noon kept every later launch
+    backing off politely while nothing archived. Archived runs cannot be
+    backfilled, so those minutes are the whole point.
+    """
+    dead = _a_pid_that_has_exited()
+    fresh = dt.datetime.now(dt.timezone.utc)
+    lock_path.write_text(f"{fresh.isoformat()}\n{dead}\n", encoding="utf-8")
+    assert da.acquire_lock() is True
+    _, pid = da._read_lock()
+    assert pid == os.getpid()
+
+
+def test_a_live_process_is_obeyed_however_the_clock_reads(lock_path):
+    fresh = dt.datetime.now(dt.timezone.utc)
+    lock_path.write_text(f"{fresh.isoformat()}\n{os.getpid()}\n", encoding="utf-8")
+    assert da.acquire_lock() is False
+
+
+def test_a_live_pid_silent_for_hours_is_treated_as_recycled(lock_path):
+    """A pid the OS has handed to something else must not block forever.
+
+    Our own pid stands in for the recycled one: alive, but with a heartbeat far
+    older than any running loop would leave.
+    """
+    old = dt.datetime.now(dt.timezone.utc) - dt.timedelta(
+        minutes=da.CHECK_EVERY_MIN * 8
+    )
+    lock_path.write_text(f"{old.isoformat()}\n{os.getpid()}\n", encoding="utf-8")
+    assert da.acquire_lock() is True
+
+
+def test_release_does_not_drop_a_lock_someone_else_took_over(lock_path):
+    """After a takeover the previous owner may still be shutting down.
+
+    If its `finally: release_lock()` deleted the new owner's lock, the takeover
+    would leave the live loop unprotected -- two loops, double every request.
+    """
+    fresh = dt.datetime.now(dt.timezone.utc)
+    other = _a_pid_that_has_exited()
+    lock_path.write_text(f"{fresh.isoformat()}\n{other}\n", encoding="utf-8")
+    da.release_lock()
+    assert lock_path.exists()
+
+
+def test_liveness_probe_answers_for_this_process(lock_path):
+    assert da._process_alive(os.getpid()) is True
+    assert da._process_alive(_a_pid_that_has_exited()) is False
+    assert da._process_alive(0) is None
+
+
+def test_a_stop_request_is_consumed_once(monkeypatch, tmp_path):
+    """The off switch has to be one-shot.
+
+    A stop file left behind would stop the next loop too -- and the next launch
+    after that is often the one that would have caught the day's run.
+    """
+    stop = tmp_path / "archive.stop"
+    monkeypatch.setattr(da, "STOP", stop)
+    assert da.stop_requested() is False
+    stop.write_text("", encoding="utf-8")
+    assert da.stop_requested() is True
+    assert not stop.exists()
+    assert da.stop_requested() is False
+
+
+def _a_pid_that_has_exited() -> int:
+    """A pid that is certainly not running: start a process, wait for its end."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid

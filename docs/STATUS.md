@@ -156,15 +156,69 @@ Archived forecast runs **cannot be backfilled**. There is no archived-forecast
 air-quality product (checked both hosts, `data-findings.md` section 13), so
 `cams_runs` and `meteo_runs` grow only by this job running.
 
-- Runs as a resident loop via `scripts/run_archive.bat`, started from the
-  Startup folder at logon. It re-checks every 30 min and asks whether today's
+- Runs as a resident loop, **started hidden** from
+  `scripts/run_archive_hidden.vbs` (put the shortcut to *that* in the Startup
+  folder, not to the `.bat`). It re-checks every 30 min and asks whether today's
   run is in the store, not what time it is, so sleep and reboots cannot make it
   miss.
+- **Stop it with `scripts/stop_archive.bat`.** Not by killing python, which
+  orphans the lock; not by closing a window, which is how three loops died.
 - Verify by the log, never by a launcher's report: `airshed health` (exit 0 =
   fine) or `Get-Content C:/SIH/data/archive.log -Tail 5`.
 - Backup is set to `C:/airshed-backup`. **It is on the same disk** — that
   protects against an accidental delete, not a drive failure. Moving it to a USB
   drive or a synced folder is one line in `.env`.
+
+**It stopped three times in two days (2026-08-24 22:35 UTC, 2026-08-25 12:06 and
+~12:30), each time with nothing in the log** — the signature of a process
+stopped from outside rather than one that failed. Total silence: 8.8 h, 5.5 h
+and 65 min. Nothing was lost, because each day's run was already archived when
+the loop died, but in November that is the whole ballgame. Four changes, all in
+place and tested:
+
+1. **The lock records the pid, not just a timestamp.** A timestamp alone cannot
+   tell a running loop from a dead one, so every relaunch backed off politely
+   for the 90 minutes the age rule takes to declare a lock stale. It now asks
+   the OS whether that pid is alive: dead means take over immediately, alive
+   means refuse and say whose pid it is. A live pid silent for three hours is
+   treated as recycled and taken over anyway, so nothing can block forever.
+2. **`run_archive.bat` supervises.** If the loop exits for any reason other
+   than a deliberate stop or a correct lock refusal, it restarts it after a
+   minute.
+3. **The loop can run with no console window at all** (`run_archive_hidden.vbs`)
+   — a window is a thing that gets closed while tidying the taskbar. The off
+   switch is therefore a file: `stop_archive.bat` drops `data/archive.stop`, the
+   loop notices within ~5 s, exits 0, releases its lock, and the supervisor
+   stays stopped.
+4. **A pass is wrapped in `keep_awake`**, so the machine cannot sleep through a
+   five-minute fetch.
+
+### 1a. Device Guard now blocks `.venv\Scripts\python.exe` — read this first
+Discovered 2026-08-25 while restarting the archive:
+
+```
+'C:\SIH\.venv\Scripts\python.exe' was blocked by your organization's
+Device Guard policy.        (exit 1073751882, STATUS_INVALID_IMAGE_HASH)
+```
+
+The uv-managed interpreter the venv was **built from** still runs, so this is
+about that copy of the binary, not about Python. Until the policy is changed,
+**every command in this file that starts `.venv\Scripts\python.exe` will fail**,
+including the demo launcher — which would have failed on the day, in the room,
+with no dashboard.
+
+`scripts/airshed_py.bat` is the workaround: it probes the venv interpreter, and
+when that is refused it runs the uv one with `\.venv\Lib\site-packages` and
+`src` on `PYTHONPATH`. Same code, same packages, a binary the policy allows.
+`run_archive.bat` and `run_dashboard.bat` both go through it.
+
+    scripts\airshed_py.bat -m airshed.cli health
+    scripts\airshed_py.bat scripts\daily_archive.py --health
+
+The proper fix is to allow the interpreter (or recreate the venv so it is a
+binary the policy accepts) and then delete the shim — nothing depends on it
+except convenience. Do that **before** relying on any Startup-folder launcher,
+because a policy that blocks a binary at launch will stop the archive silently.
 
 ### 2. November 2026 — what everything else is waiting for
 A second episode season resolves, in one run: fires, upwind corridor, coupled

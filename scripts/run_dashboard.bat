@@ -21,4 +21,9 @@ echo.
 REM Give uvicorn a moment to bind before the browser asks for the page.
 start "" /min cmd /c "timeout /t 4 >nul & start http://localhost:8018"
 
-"C:\SIH\.venv\Scripts\python.exe" -m uvicorn airshed.api.app:app --port 8018
+REM Through the interpreter shim, not .venv\Scripts\python.exe directly: Device
+REM Guard began refusing that binary on 2026-08-25 (exit 1073751882), which
+REM would have failed on demo day with "blocked by your organization's policy"
+REM and no dashboard. The shim falls back to the uv interpreter the venv was
+REM built from. See scripts\airshed_py.bat.
+call "C:\SIH\scripts\airshed_py.bat" -m uvicorn airshed.api.app:app --port 8018

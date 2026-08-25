@@ -41,6 +41,7 @@ from pathlib import Path
 
 from airshed.config import repo_root
 from airshed.env import load_dotenv
+from airshed.keepawake import keep_awake
 from airshed.net import DailyQuotaExceeded
 from airshed.ingest import cams, cpcb, metar, meteo
 from airshed.store import coverage
@@ -50,6 +51,17 @@ from airshed.store import coverage
 # somewhere unwritable — or worse, somewhere unexpected but writable.
 LOG = repo_root() / "data" / "archive.log"
 LOCK = repo_root() / "data" / "archive.lock"
+
+# Deliberate off switch. The loop can run with no console attached -- that is
+# the point of the hidden launcher, since a console window is a thing that gets
+# closed by accident, and three loops died that way in two days. A window you
+# cannot close needs a stop that is not "close the window", so stopping is a
+# file: `stop_archive.bat` creates it, the loop notices within seconds, exits 0,
+# and the supervisor treats 0 as "stay stopped".
+STOP = repo_root() / "data" / "archive.stop"
+
+# How often the loop wakes to notice a stop request while waiting out its tick.
+STOP_POLL_S = 5
 
 # How far back to re-check the archive datasets each day. Comfortably more than
 # any source's publication lag, so a few days of downtime heal by themselves.
@@ -75,10 +87,22 @@ IRREPLACEABLE = ("cams_runs", "meteo_runs")
 
 
 def one_pass() -> int:
-    """Fetch everything due. Idempotent — safe to call as often as you like."""
+    """Fetch everything due. Idempotent — safe to call as often as you like.
+
+    Held awake for the duration. A pass takes about five minutes and the machine
+    sleeping through it costs a tick, not data — but in November a tick is worth
+    holding the lid open for. The request dies with the process and changes no
+    power setting, so a crash cannot leave the laptop permanently awake.
+    """
     log = logging.getLogger("archive")
     log.info("archive pass starting (%s UTC)", dt.datetime.now(dt.timezone.utc))
+    with keep_awake("airshed archive pass"):
+        return _one_pass()
 
+
+def _one_pass() -> int:
+    """The pass itself, so `one_pass` is only the wakefulness wrapper."""
+    log = logging.getLogger("archive")
     failures = 0
     quota_hit = False
     for name, fn in (("cams", cams.archive_run), ("meteo", meteo.archive_run)):
@@ -314,6 +338,63 @@ def backup() -> bool:
 # ---------------------------------------------------------------------------
 # single instance
 # ---------------------------------------------------------------------------
+def _process_alive(pid: int) -> bool | None:
+    """Is that process still running? `None` means we could not tell.
+
+    Deliberately not `os.kill(pid, 0)`: on Windows that maps to TerminateProcess
+    for anything other than CTRL_*_EVENT, so the liveness probe would kill the
+    process it was asking about.
+    """
+    if pid <= 0:
+        return None
+    if sys.platform.startswith("win"):
+        try:
+            import ctypes
+
+            SYNCHRONIZE, WAIT_TIMEOUT, ERROR_ACCESS_DENIED = 0x00100000, 0x102, 5
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
+            if not handle:
+                # Access denied means it exists and belongs to someone else.
+                return kernel32.GetLastError() == ERROR_ACCESS_DENIED
+            try:
+                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
+            finally:
+                kernel32.CloseHandle(handle)
+        except Exception:
+            return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return None
+    return True
+
+
+def _read_lock() -> tuple[float, int | None]:
+    """Age of the lock in minutes, and the pid that wrote it if it recorded one.
+
+    Locks written before this file recorded pids hold a bare timestamp, so the
+    pid is optional and its absence falls back to the age rule.
+    """
+    try:
+        lines = LOCK.read_text(encoding="utf-8").strip().splitlines()
+        stamp = dt.datetime.fromisoformat(lines[0].strip())
+        age_min = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds() / 60
+    except (ValueError, OSError, IndexError):
+        return float("inf"), None
+    pid = None
+    if len(lines) > 1:
+        try:
+            pid = int(lines[1].strip())
+        except ValueError:
+            pid = None
+    return age_min, pid
+
+
 def acquire_lock() -> bool:
     """Refuse to start a second copy. Two loops would double every request.
 
@@ -321,34 +402,79 @@ def acquire_lock() -> bool:
     means "the lid closed and it never came back" - is taken over rather than
     treated as fatal. A lock that outlives its process must not be able to stop
     the archive forever; that would be the outage it exists to prevent.
+
+    The lock records the pid as well as the time, because a timestamp alone
+    cannot tell a running loop from a dead one. It happened twice in two days:
+    the loop was killed without cleanup, the lock outlived it, and every later
+    launch backed off politely for the 90 minutes the age rule takes to declare
+    a lock stale. Asking the operating system whether that pid is still alive
+    turns a 90-minute blind spot into an immediate takeover, and makes the
+    refusal correct rather than merely probable when it *is* alive.
+
+    Three guards, in order of how much they know:
+
+    * pid recorded and dead      -> take over now, whatever the clock says
+    * pid recorded and alive     -> refuse, unless the stamp is so old that the
+                                    pid has plainly been recycled by the OS
+    * no pid, or liveness unknown-> fall back to the age rule
     """
     log = logging.getLogger("archive")
     now = dt.datetime.now(dt.timezone.utc)
+
     if LOCK.is_file():
-        try:
-            stamp = dt.datetime.fromisoformat(LOCK.read_text(encoding="utf-8").strip())
-            age_min = (now - stamp).total_seconds() / 60
-        except (ValueError, OSError):
-            age_min = float("inf")
-        if age_min < CHECK_EVERY_MIN * 3:
+        age_min, pid = _read_lock()
+        alive = _process_alive(pid) if pid is not None else None
+
+        if alive is False:
+            log.warning(
+                "lock left by dead process %d (%.0f min old) - taking over", pid, age_min
+            )
+        elif alive is True and age_min >= CHECK_EVERY_MIN * 6:
+            # A live pid this far past its last heartbeat is not our loop; the
+            # OS has recycled the number. Blocking forever on that would be the
+            # outage the lock exists to prevent.
+            log.warning(
+                "lock names pid %d, alive but silent for %.0f min - assuming "
+                "the pid was recycled and taking over",
+                pid,
+                age_min,
+            )
+        elif alive is True:
+            log.warning("archive already running as pid %d; exiting", pid)
+            return False
+        elif age_min < CHECK_EVERY_MIN * 3:
             log.warning("another archive process appears to be running; exiting")
             return False
-        log.warning("stale lock (%.0f min old) - taking over", age_min)
+        else:
+            log.warning("stale lock (%.0f min old) - taking over", age_min)
 
     LOCK.parent.mkdir(parents=True, exist_ok=True)
-    LOCK.write_text(now.isoformat(), encoding="utf-8")
+    _write_lock(now)
     return True
+
+
+def _write_lock(when: dt.datetime) -> None:
+    LOCK.write_text(f"{when.isoformat()}\n{os.getpid()}\n", encoding="utf-8")
 
 
 def touch_lock() -> None:
     try:
-        LOCK.write_text(dt.datetime.now(dt.timezone.utc).isoformat(), encoding="utf-8")
+        _write_lock(dt.datetime.now(dt.timezone.utc))
     except OSError:
         pass
 
 
 def release_lock() -> None:
+    """Drop the lock, but only if it is still ours.
+
+    After a takeover the previous owner may still be shutting down. Deleting a
+    lock it no longer holds would leave the live loop unprotected.
+    """
     try:
+        if LOCK.is_file():
+            _, pid = _read_lock()
+            if pid is not None and pid != os.getpid():
+                return
         LOCK.unlink(missing_ok=True)
     except OSError:
         pass
@@ -397,15 +523,48 @@ def sync_observations() -> None:
         log.error("observation sync failed: %s", str(exc)[:300])
 
 
+def stop_requested() -> bool:
+    """Has someone asked the loop to stop? Consumes the request if so."""
+    try:
+        if STOP.is_file():
+            STOP.unlink(missing_ok=True)
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _wait_for_next_tick() -> bool:
+    """Sleep out the tick in slices. True if a stop was requested meanwhile.
+
+    One long sleep would make the off switch take up to half an hour to answer,
+    which is long enough that an operator reaches for Task Manager instead --
+    and killing the process is exactly the ending that leaves an orphaned lock.
+    """
+    remaining = CHECK_EVERY_MIN * 60
+    while remaining > 0:
+        time.sleep(min(STOP_POLL_S, remaining))
+        remaining -= STOP_POLL_S
+        if stop_requested():
+            return True
+    return False
+
+
 def loop() -> int:
     log = logging.getLogger("archive")
     if not acquire_lock():
         return 1
     log.info(
-        "archive loop started; checking every %d min, log at %s", CHECK_EVERY_MIN, LOG
+        "archive loop started as pid %d; checking every %d min, log at %s",
+        os.getpid(),
+        CHECK_EVERY_MIN,
+        LOG,
     )
     try:
         while True:
+            if stop_requested():
+                log.info("stop requested; archive loop exiting")
+                return 0
             touch_lock()
             try:
                 if is_due():
@@ -421,7 +580,9 @@ def loop() -> int:
                 # A loop that dies on one bad night is a loop that was not worth
                 # writing. Log it and try again on the next tick.
                 log.error("pass raised, continuing: %s", str(exc)[:300])
-            time.sleep(CHECK_EVERY_MIN * 60)
+            if _wait_for_next_tick():
+                log.info("stop requested; archive loop exiting")
+                return 0
     except KeyboardInterrupt:
         log.info("archive loop stopped")
         return 0
