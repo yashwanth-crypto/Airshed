@@ -734,9 +734,17 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
       <b>Replay is the demo centrepiece, and it doubles as validation.</b> Pick any past date and
       the system rebuilds what it <i>would</i> have forecast from cache alone — using the
       meteorology genuinely in hand at issue time, not the cleaner short-lead value the archive
-      returns — then scores it against what CPCB actually recorded. Replaying 12 November 2025 at
-      24 hours: 1,418 station-hours, model RMSE <b>68.0 µg/m³</b> against raw CAMS at
-      <b>197.8</b>.
+      returns — then scores it against what CPCB actually recorded.
+      <br><br>
+      The interface opens on the dirtiest day inside a <b>held-out</b> block, chosen from the
+      split configuration rather than picked by hand, and states on screen which split the date
+      belongs to. On 22 December 2025 — a 259 µg/m³ severe episode the model has never seen —
+      the 24-hour forecast reads <b>91 µg/m³ RMSE against raw CAMS at 123</b>.
+      <br><br>
+      It defaulted to a November date until we checked, and that date sits in the
+      <i>training</i> blocks. The number was better and it was in-sample. A replay of a training
+      day is an illustration; only a held-out day is evidence, and the page should not need the
+      viewer to know the difference.
     </div>
   </div>
 </section>
@@ -895,6 +903,11 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
       <li><b>Fires help less than the physics says they should</b> — +0.9%, on 3 of 5 folds. But
         their best fold by far is the stubble season itself, at +4.6%, which is exactly where the
         mechanism predicts. One burning season cannot separate that from noise.</li>
+      <li><b>Tuning the model did nothing.</b> Twenty-four configurations across a
+        12,288-point search space. The best won +2.0% on the validation split and <i>lost</i>
+        0.3% on the held-out test split, at 2.4× the compute — so we reverted it. The useful
+        result is the null one: the model was never badly mistuned, which is what the search
+        existed to find out, and that is a firmer statement than a gain that evaporated.</li>
       <li><b>Our own 48 and 72 hour numbers were mildly optimistic</b> — by 0.9%, worse on 5 of 5
         folds. The archives hand back the <i>best available</i> forecast for each past hour, which
         is a short-lead one, so the model was trained on cleaner inputs than production will ever
@@ -969,7 +982,7 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
         <tr><td>Spatial downscaling</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">81.8 µg/m³ leave-one-station-out</td></tr>
         <tr><td>Dashboard + replay</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">MapLibre, intervals everywhere, staleness visible</td></tr>
         <tr><td>Network expansion to 77</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">All seven results documents regenerated</td></tr>
-        <tr><td>Hyperparameter search</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">24 configurations; the defaults held on test</td></tr>
+        <tr><td>Hyperparameter search</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">24 configs over a 12,288-point space; defaults held on test</td></tr>
         <tr><td>Second winter of ground truth</td><td><span class="tag wait">Nov 2026</span></td><td class="wrap-ok">The constraint behind every “cannot tell”</td></tr>
         <tr><td>CAMS train/serve correction</td><td><span class="tag wait">3 of 20 run days</span></td><td class="wrap-ok">Cannot be backfilled; accrues one day at a time</td></tr>
       </tbody>
