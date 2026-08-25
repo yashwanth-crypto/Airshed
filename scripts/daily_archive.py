@@ -144,14 +144,16 @@ def one_pass() -> int:
     # expansion ran out of daily quota partway and left exactly this shape, so
     # the job repairs it itself rather than waiting to be remembered.
     try:
-        from airshed.ingest.repair import missing_stations, short_partitions
+        from airshed.ingest.repair import short_partitions, stations_missing_from
 
-        wanted = missing_stations(meteo.LEADMATCHED_DATASET)
-        if wanted:
-            short = short_partitions(
-                meteo.LEADMATCHED_DATASET, LEADMATCH_MIN_STATIONS
-            )
-            if short:
+        # Driven by which partitions are short, not by whether the newest one
+        # is. The top-up above repairs the newest days first, so a probe of the
+        # latest partition comes back clean while the backlog is untouched --
+        # and this repair, gated on that probe, silently did nothing.
+        short = short_partitions(meteo.LEADMATCHED_DATASET, LEADMATCH_MIN_STATIONS)
+        if short:
+            wanted = stations_missing_from(meteo.LEADMATCHED_DATASET, short)
+            if wanted:
                 log.info(
                     "meteo_leadmatched: %d partition(s) short (%s..%s), filling "
                     "%d station(s)",

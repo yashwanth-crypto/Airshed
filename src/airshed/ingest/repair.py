@@ -58,6 +58,26 @@ def short_partitions(
     return out
 
 
+def stations_missing_from(dataset: str, days: list, cfg: Config | None = None) -> list[str]:
+    """Configured stations absent from the given partitions.
+
+    `missing_stations` inspects only the newest partition, which answers "is
+    anything missing right now". That is the wrong question after a top-up: the
+    top-up repairs the newest days first, so the probe comes back clean while
+    hundreds of older partitions are still short, and a repair gated on it never
+    runs. Ask about the partitions actually being repaired instead.
+    """
+    cfg = cfg or load_config()
+    present: set[str] = set()
+    for day in days:
+        present |= set(
+            pl.read_parquet(partition_path(dataset, day), columns=["station_id"])[
+                "station_id"
+            ].unique().to_list()
+        )
+    return [s.id for s in cfg.stations if s.id not in present]
+
+
 def expand(dataset: str, cfg: Config | None = None) -> int:
     """Copy each missing station's cell-mate rows across every partition.
 

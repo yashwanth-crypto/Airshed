@@ -26,7 +26,7 @@ import sys
 
 from airshed.env import load_dotenv
 from airshed.ingest import meteo
-from airshed.ingest.repair import missing_stations, short_partitions
+from airshed.ingest.repair import short_partitions, stations_missing_from
 from airshed.net import DailyQuotaExceeded
 
 DATASET = "meteo_leadmatched"
@@ -44,7 +44,9 @@ def main() -> int:
         log.info("%s already carries every station — nothing to do", DATASET)
         return 0
 
-    ids = missing_stations(DATASET)
+    # Asked of the short partitions, not the newest one -- see
+    # repair.stations_missing_from.
+    ids = stations_missing_from(DATASET, short)
     log.info(
         "%d partition(s) short, %s..%s; fetching %d station(s)",
         len(short), short[0], short[-1], len(ids),
