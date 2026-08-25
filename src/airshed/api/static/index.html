@@ -186,10 +186,19 @@ async function loadDays() {
 }
 
 // ---------------------------------------------------------------- live
+// Per-stage declaration thresholds, sent by the API so this matches the rule
+// the evaluation scores against. The fallback mirrors config.toml; a flat
+// number here was wrong for three of four stages and over-declared every one.
+let STAGE_THRESHOLDS = {1:0.50, 2:0.40, 3:0.25, 4:0.20};
+
 function stagePill(p) {
-  // Colour by the most severe stage with a meaningful chance.
+  // The most severe stage whose probability clears *its own* threshold. The
+  // thresholds fall as severity rises on purpose: Stage III is declared at a
+  // one-in-four chance because missing a severe episode costs more than a
+  // false alarm, while Stage I needs an even chance because declaring it too
+  // readily is how a warning system stops being believed.
   for (const s of [4,3,2,1]) {
-    if ((p[`at_least_${s}`] ?? 0) >= 0.25) return s;
+    if ((p[`at_least_${s}`] ?? 0) >= (STAGE_THRESHOLDS[s] ?? 0.25)) return s;
   }
   return 0;
 }
@@ -199,6 +208,7 @@ async function loadLive() {
     const r = await fetch("/api/forecast");
     if (!r.ok) throw new Error((await r.json()).detail || r.statusText);
     const d = await r.json();
+    if (d.stage_thresholds) STAGE_THRESHOLDS = d.stage_thresholds;
     const rows = d.horizons.map(h => {
       const s = stagePill(h.grap);
       const label = s ? `<span class="pill stage${s}">${STAGE_NAMES[s]}</span>`

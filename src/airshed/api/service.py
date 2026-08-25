@@ -22,6 +22,7 @@ import polars as pl
 from .. import attribution, grap
 from ..config import load_config
 from ..eval import ablation
+from ..eval import grap_eval
 from ..features import build as feat
 from ..models import surface as surface_mod
 from ..models.calibrate import CalibratedModel
@@ -96,10 +97,18 @@ class Service:
             last = info["last"]
             age_h = None
             if last:
+                # Measured from the END of the newest partition's day, not its
+                # midnight. Partitions are dated, not stamped, and each holds up
+                # to 24 hours of data -- so measuring from midnight reported a
+                # feed that was 8 h behind as 29 h behind, which is the
+                # difference between "normal lag" and "something is broken".
+                end_of_day = dt.datetime.combine(
+                    dt.date.fromisoformat(str(last)),
+                    dt.time(23, 59),
+                    tzinfo=dt.timezone.utc,
+                )
                 age_h = round(
-                    (dt.datetime.now(dt.timezone.utc)
-                     - dt.datetime.fromisoformat(last).replace(tzinfo=dt.timezone.utc))
-                    .total_seconds() / 3600,
+                    max(0.0, (dt.datetime.now(dt.timezone.utc) - end_of_day).total_seconds() / 3600),
                     1,
                 )
             datasets[name] = {**info, "age_hours": age_h}
@@ -349,6 +358,15 @@ class Service:
             "horizons": by_horizon,
             "drivers": self._live_drivers(sup),
             "input_gap": self._input_gap(),
+            # Sent so the interface declares stages by the same rule the
+            # evaluation does. It previously hardcoded a flat 0.25 and had
+            # drifted from the configured thresholds, which are deliberately
+            # asymmetric -- a low bar for Severe because missing an episode
+            # costs more than a false alarm, a high one for Poor because
+            # declaring Poor on a one-in-four chance is crying wolf.
+            "stage_thresholds": {
+                str(k): v for k, v in grap_eval.DEFAULT_THRESHOLDS.items()
+            },
         }
 
     def _input_gap(self) -> dict:
