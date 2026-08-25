@@ -43,6 +43,7 @@ from airshed.config import repo_root
 from airshed.env import load_dotenv
 from airshed.keepawake import keep_awake
 from airshed.net import DailyQuotaExceeded
+from airshed.procs import process_alive, read_lock
 from airshed.ingest import cams, cpcb, metar, meteo
 from airshed.store import coverage
 
@@ -338,63 +339,6 @@ def backup() -> bool:
 # ---------------------------------------------------------------------------
 # single instance
 # ---------------------------------------------------------------------------
-def _process_alive(pid: int) -> bool | None:
-    """Is that process still running? `None` means we could not tell.
-
-    Deliberately not `os.kill(pid, 0)`: on Windows that maps to TerminateProcess
-    for anything other than CTRL_*_EVENT, so the liveness probe would kill the
-    process it was asking about.
-    """
-    if pid <= 0:
-        return None
-    if sys.platform.startswith("win"):
-        try:
-            import ctypes
-
-            SYNCHRONIZE, WAIT_TIMEOUT, ERROR_ACCESS_DENIED = 0x00100000, 0x102, 5
-            kernel32 = ctypes.windll.kernel32
-            handle = kernel32.OpenProcess(SYNCHRONIZE, False, pid)
-            if not handle:
-                # Access denied means it exists and belongs to someone else.
-                return kernel32.GetLastError() == ERROR_ACCESS_DENIED
-            try:
-                return kernel32.WaitForSingleObject(handle, 0) == WAIT_TIMEOUT
-            finally:
-                kernel32.CloseHandle(handle)
-        except Exception:
-            return None
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except OSError:
-        return None
-    return True
-
-
-def _read_lock() -> tuple[float, int | None]:
-    """Age of the lock in minutes, and the pid that wrote it if it recorded one.
-
-    Locks written before this file recorded pids hold a bare timestamp, so the
-    pid is optional and its absence falls back to the age rule.
-    """
-    try:
-        lines = LOCK.read_text(encoding="utf-8").strip().splitlines()
-        stamp = dt.datetime.fromisoformat(lines[0].strip())
-        age_min = (dt.datetime.now(dt.timezone.utc) - stamp).total_seconds() / 60
-    except (ValueError, OSError, IndexError):
-        return float("inf"), None
-    pid = None
-    if len(lines) > 1:
-        try:
-            pid = int(lines[1].strip())
-        except ValueError:
-            pid = None
-    return age_min, pid
-
-
 def acquire_lock() -> bool:
     """Refuse to start a second copy. Two loops would double every request.
 
@@ -422,8 +366,8 @@ def acquire_lock() -> bool:
     now = dt.datetime.now(dt.timezone.utc)
 
     if LOCK.is_file():
-        age_min, pid = _read_lock()
-        alive = _process_alive(pid) if pid is not None else None
+        age_min, pid = read_lock(LOCK)
+        alive = process_alive(pid) if pid is not None else None
 
         if alive is False:
             log.warning(
@@ -472,7 +416,7 @@ def release_lock() -> None:
     """
     try:
         if LOCK.is_file():
-            _, pid = _read_lock()
+            _, pid = read_lock(LOCK)
             if pid is not None and pid != os.getpid():
                 return
         LOCK.unlink(missing_ok=True)

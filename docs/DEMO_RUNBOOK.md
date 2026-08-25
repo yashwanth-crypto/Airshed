@@ -5,6 +5,48 @@ on the day.
 
 ---
 
+## After a restart — what you have to do
+
+**One thing, and only when you want the dashboard.** Everything the model needs
+comes back by itself.
+
+| what | comes back how | you do |
+|---|---|---|
+| Archive loop — CAMS + GFS runs, CPCB observations, archive top-ups, backup | Startup folder shortcut → `scripts\run_archive_hidden.vbs`, no window | nothing |
+| Data — 9.1 M rows of Parquet | on disk, nothing to load | nothing |
+| Model — fitted and calibrated | cached pickle at `data\processed\forecast_model.pkl` | nothing |
+| API keys — OpenAQ, FIRMS | read from `.env` on every run | nothing |
+| Dashboard on `localhost:8018` | **not** started at logon, on purpose — a web server you did not ask for should not be listening every time you log in | `scripts\run_dashboard.bat` |
+
+There is no database server, no scheduler service and no cloud anything to bring
+up. That is the point of Parquet + DuckDB.
+
+**Then check it, don't assume it.** Double-click:
+
+```
+scripts\check_system.bat
+```
+
+Four lines and a verdict: is the loop running (with its pid), are the run stores
+current, is the model cached, is the dashboard listening. It ends in
+`VERDICT: everything the model needs is alive and current` or tells you which
+one is down.
+
+### If the check says the archive loop is not running
+
+Double-click `scripts\run_archive_hidden.vbs`. It starts hidden and takes about
+five seconds to appear in the log. Stop it — ever — with
+`scripts\stop_archive.bat`, never by killing python, which leaves an orphaned
+lock behind.
+
+### If a command fails with "blocked by your organization's Device Guard policy"
+
+Device Guard is refusing `.venv\Scripts\python.exe` (since 2026-08-25). Use
+`scripts\airshed_py.bat` in place of that interpreter — both launchers already
+do. `docs/STATUS.md` §1a has the detail and the proper fix.
+
+---
+
 ## Before you leave the house
 
 ```

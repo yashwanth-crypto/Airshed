@@ -23,7 +23,8 @@ of trainable ground truth; the second season is November 2026.
 ## Environment
 
 - Python 3.11 via `uv`; venv at `.venv`. Run things as
-  `.venv/Scripts/python.exe -m airshed.cli ...`.
+  `scriptsirshed_py.bat -m airshed.cli ...` — **not**
+  `.venv/Scripts/python.exe`, which Device Guard now blocks (see 1a below).
 - Git repo initialised; first commit `f5890f2` holds all 83 source, test and
   doc files. Identity is set at repo level to `yashwanth-crypto
   <nadhahari44@gmail.com>` per `CLAUDE.md`. **`data/` is gitignored** and
@@ -163,6 +164,10 @@ air-quality product (checked both hosts, `data-findings.md` section 13), so
   miss.
 - **Stop it with `scripts/stop_archive.bat`.** Not by killing python, which
   orphans the lock; not by closing a window, which is how three loops died.
+- **After a restart you do nothing** — the Startup shortcut brings the loop
+  back. Confirm with `scripts/check_system.bat`, which answers in one screen
+  whether the loop, the run stores, the model and the dashboard are all up.
+  `docs/DEMO_RUNBOOK.md` opens with the restart procedure.
 - Verify by the log, never by a launcher's report: `airshed health` (exit 0 =
   fine) or `Get-Content C:/SIH/data/archive.log -Tail 5`.
 - Backup is set to `C:/airshed-backup`. **It is on the same disk** — that

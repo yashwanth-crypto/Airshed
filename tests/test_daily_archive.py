@@ -18,6 +18,8 @@ from pathlib import Path
 
 import pytest
 
+from airshed.procs import lock_state, process_alive, read_lock
+
 REPO = Path(__file__).resolve().parents[1]
 
 
@@ -190,7 +192,7 @@ def test_an_unreadable_lock_is_taken_over(lock_path):
 def test_the_lock_records_the_pid_that_holds_it(lock_path):
     """A timestamp alone cannot tell a running loop from a dead one."""
     assert da.acquire_lock() is True
-    age_min, pid = da._read_lock()
+    age_min, pid = read_lock(lock_path)
     assert pid == os.getpid()
     assert age_min < 1
 
@@ -207,7 +209,7 @@ def test_a_fresh_lock_from_a_dead_process_is_taken_over_at_once(lock_path):
     fresh = dt.datetime.now(dt.timezone.utc)
     lock_path.write_text(f"{fresh.isoformat()}\n{dead}\n", encoding="utf-8")
     assert da.acquire_lock() is True
-    _, pid = da._read_lock()
+    _, pid = read_lock(lock_path)
     assert pid == os.getpid()
 
 
@@ -243,10 +245,10 @@ def test_release_does_not_drop_a_lock_someone_else_took_over(lock_path):
     assert lock_path.exists()
 
 
-def test_liveness_probe_answers_for_this_process(lock_path):
-    assert da._process_alive(os.getpid()) is True
-    assert da._process_alive(_a_pid_that_has_exited()) is False
-    assert da._process_alive(0) is None
+def test_liveness_probe_answers_for_this_process():
+    assert process_alive(os.getpid()) is True
+    assert process_alive(_a_pid_that_has_exited()) is False
+    assert process_alive(0) is None
 
 
 def test_a_stop_request_is_consumed_once(monkeypatch, tmp_path):

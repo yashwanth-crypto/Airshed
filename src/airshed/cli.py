@@ -334,6 +334,11 @@ def health() -> None:
                 f"newest {info['last']}, {age_h:.0f} h old"
             )
 
+    # Is the loop itself alive? Freshness alone cannot answer this: a loop that
+    # archived this morning and died at noon leaves runs that look perfectly
+    # healthy for another 36 hours. That happened three times in two days.
+    worst = max(worst, _report_loop_state())
+
     if not os.environ.get("AIRSHED_BACKUP_DIR"):
         console.print(
             "[yellow]AIRSHED_BACKUP_DIR is not set[/] — the run stores exist on "
@@ -341,6 +346,44 @@ def health() -> None:
         )
         worst = max(worst, 1)
     raise typer.Exit(worst)
+
+
+def _report_loop_state() -> int:
+    """Print whether the archive loop is running. Returns its severity."""
+    from .procs import lock_state
+
+    state = lock_state(load_config().data_root / "archive.lock")
+    start = "start it with [bold]scripts\\run_archive_hidden.vbs[/]"
+
+    if not state["held"]:
+        console.print(f"[red]archive loop: NOT RUNNING[/] — no lock held; {start}")
+        return 2
+    if state["running"] is False:
+        console.print(
+            f"[red]archive loop: DEAD[/] — lock held by pid {state['pid']}, which "
+            f"is gone. Nothing is archiving; {start}"
+        )
+        return 2
+    if state["running"] is None:
+        console.print(
+            "[yellow]archive loop: UNKNOWN[/] — the lock names no pid, so it was "
+            "written by an older build. Restart it to get a definite answer."
+        )
+        return 1
+    age = state["age_min"]
+    # Silence well past a tick means it is alive but wedged — mid-fetch at worst,
+    # stuck at best, and either way not the same as healthy.
+    if age is not None and age > 90:
+        console.print(
+            f"[yellow]archive loop: QUIET[/] — pid {state['pid']} alive but has "
+            f"not checked in for {age:.0f} min (it should every 30)."
+        )
+        return 1
+    console.print(
+        f"[green]archive loop: running[/] — pid {state['pid']}, "
+        f"last check-in {age:.0f} min ago"
+    )
+    return 0
 
 
 @app.command("camsoffset")
