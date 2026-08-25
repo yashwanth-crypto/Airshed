@@ -649,3 +649,41 @@ sensitivity to basket definition, and this inverse distance relationship.
 
 Do not present the physical mechanism. Present the number, and say the mechanism
 is unresolved on one year of data.
+
+---
+
+## 17. The run store already carries the reverse-direction inputs
+
+Checked before starting any coupling work, because the answer decides whether
+November is usable and the check costs a minute. If `meteo_runs` did not carry
+visibility and humidity at lead, the pollution-to-weather experiment could never
+be repeated on episode-season data at the lead it is actually served at — and
+that would only surface in January, with the season gone.
+
+It does carry them. Every run partition, all five lead days, no nulls:
+
+| column | lead day 0 | 1 | 2 | 3 | 4 |
+|---|---|---|---|---|---|
+| `visibility` | 100% | 100% | 100% | 100% | 100% |
+| `relative_humidity_2m` | 100% | 100% | 100% | 100% | 100% |
+| `dew_point_2m` | 100% | 100% | 100% | 100% | 100% |
+| `boundary_layer_height` | 100% | 100% | 100% | 100% | 100% |
+| `inversion` (derived) | 100% | 100% | 100% | 100% | 100% |
+
+Measured 2026-08-25 across all three archived runs (`lead_h` 0–119). The
+2026-08-25 run carries 77 stations; 2026-08-23 and 08-24 carry 51, which dates
+them to before the expansion in section 14 rather than to any gap in the fetch.
+
+This follows from `[sources.meteo].hourly` in `config.toml`, which `archive_run`
+passes straight through — but config states what was *requested*, and Open-Meteo
+answers a request for an unavailable variable with a column of nulls rather than
+an error. That is exactly how the BLH-on-non-GFS trap in section 6 worked. So
+the column list was checked against the stored parquet, not against the config.
+
+**The gap is elsewhere, and it is the one already documented in section 12:**
+`lead_matched_hourly` excludes BLH, visibility and every pressure-level
+variable, because the Previous Runs API has no `_previous_dayN` form for them.
+Training visibility therefore stays short-lead while serving visibility is a
+genuine forecast. For the pollution-to-weather experiment that asymmetry is the
+same hazard R1 names, one level down, and it closes only forward as `meteo_runs`
+accumulates — which is the other reason the archive job must not stop.
