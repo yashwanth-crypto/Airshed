@@ -41,7 +41,20 @@ QUANTILES = (0.1, 0.5, 0.9)
 DEFAULT_PARAMS = {
     "objective": "quantile",
     "learning_rate": 0.05,
-    "num_leaves": 31,
+    # 31 was LightGBM's default and was never revisited. A 24-configuration
+    # search on the validation split found it was the one parameter genuinely
+    # constraining the model: median RMSE at 72 h falls monotonically with tree
+    # size, 70.31 -> 69.39 -> 69.19 -> 68.97 for 31 -> 63 -> 127 -> 255, and 8
+    # of the top 10 trials used 255.
+    #
+    # Only this one is adopted. The search's best configuration changed six
+    # parameters and scored +2.0%; this single change captures +1.2% of that,
+    # and the other five showed no individual signal at all -- taking them too
+    # would be adopting a lucky combination on one validation split.
+    #
+    # It is not free: a fit goes from 33 s to 78 s on 1.07M rows, so every
+    # ablation and rolling regeneration costs about 2.4x more.
+    "num_leaves": 255,
     "min_data_in_leaf": 40,
     "feature_fraction": 0.8,
     "bagging_fraction": 0.8,
