@@ -1,12 +1,12 @@
 # CAMS train/serve gap
 
-Generated 2026-08-24 12:56 UTC. Regenerate with `airshed camsoffset`.
+Generated 2026-08-25 01:58 UTC. Regenerate with `airshed camsoffset`.
 
 The corrector is trained on `cams_archive` and served `cams_runs`. This measures how far apart those two are for the same station and hour — the distribution gap the live forecast actually runs on.
 
 **It cannot be closed retrospectively.** There is no archived-forecast air-quality product: `previous-runs-api.open-meteo.com/v1/air-quality` returns 404 and `pm2_5_previous_dayN` returns 0/48 non-null on the air-quality endpoint. The only evidence is the overlap below, which grows by one day each time the daily archive job runs, and by nothing at all on the days it does not.
 
-- runs held: **2** (2026-08-23 to 2026-08-24), of which **0** are settled
+- runs held: **3** (2026-08-23 to 2026-08-25), of which **0** are settled
 - a comparison counts as settled once the archive value is 4 days old, because a recent archive hour can still be revised and that revision is not what we are trying to measure
 
 ## Live run minus archive, by lead day
@@ -15,14 +15,15 @@ Negative bias means the served input sits **below** the input the model was fitt
 
 | lead day | true lead | rows | run days | archive mean | run mean | bias | 95% CI (clustered) | RMSE |
 |---|---|---|---|---|---|---|---|---|
-| 0 | 0–23 h | 2,448 | 2 | 70.0 | 53.9 | **-16.2** | — *(needs ≥5 run days)* | 25.4 |
-| 1 | 24–47 h | 1,224 | 1 | 79.9 | 59.3 | **-20.6** | — *(needs ≥5 run days)* | 22.9 |
+| 0 | 0–23 h | 4,296 | 3 | 77.4 | 72.9 | **-4.5** | — *(needs ≥5 run days)* | 18.1 |
+| 1 | 24–47 h | 2,448 | 2 | 82.5 | 70.3 | **-12.1** | — *(needs ≥5 run days)* | 35.5 |
+| 2 | 48–71 h | 1,224 | 1 | 98.9 | 66.4 | **-32.4** | — *(needs ≥5 run days)* | 48.4 |
 
 ## Verdict
 
 > **Not enough evidence to correct — 0 settled run day(s), 20 needed.**
 
-The gap is visible and it is in the direction that matters: the served input runs 20.6 µg/m³ below the trained input at lead day 1. But a handful of run days from one season cannot tell a systematic offset from one unusual week — which is why the interval column is mostly blank rather than reassuringly narrow.
+The gap is visible and it is in the direction that matters: the served input runs 32.4 µg/m³ below the trained input at lead day 2. But a handful of run days from one season cannot tell a systematic offset from one unusual week — which is why the interval column is mostly blank rather than reassuringly narrow.
 
 **Serving is therefore left uncorrected, on purpose.** Applying a bias fitted on this much data would replace a known, measured, reported gap with an unknown one — and it would be fitted on monsoon air and applied to a November episode, which is precisely the regime where it matters most and generalises least.
 

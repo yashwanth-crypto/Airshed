@@ -605,3 +605,47 @@ of which could have manufactured one:
    loudly, so the range is retried later instead of being silently sealed.
 
 Covered by `tests/test_archive_gaps.py`.
+
+---
+
+## 16. Localising the pollution covariate does not rescue the coupling
+
+Section 14's expansion weakened the visibility coupling: the gain fell from
++9.5% to +7.5% (stable basket) and, more importantly, stopped concentrating in
+polluted air. The obvious suspicion was the covariate. VIDP sits in south-west
+Delhi and the experiment feeds it a 44-station city mean, which includes
+monitors 30 km away across the city — a strange thing to describe the air one
+instrument is looking through.
+
+If the mechanism is aerosol scattering light at the observation site, a local
+basket should carry **more** signal. Tested over four radii, same window, same
+splits, only the basket changing:
+
+| basket | stations | gain | clean | poor | severe |
+|---|---|---|---|---|---|
+| city (44 Delhi) | 44 | **+7.5%** | +4.0% | +6.0% | +5.0% |
+| within 10 km of VIDP | 9 | +5.0% | +2.9% | +2.0% | **-1.8%** |
+| within 15 km | 23 | +6.7% | +3.0% | +4.7% | +2.2% |
+| within 20 km | 38 | +4.6% | +2.5% | +3.4% | **-0.9%** |
+| within 30 km | 62 | +5.9% | +1.3% | +3.9% | +4.4% |
+
+**Every local basket does worse than the city-wide one**, and two of them go
+*negative* in the severe band — the exact conditions where aerosol should
+dominate visibility. The nearest nine stations, which include the monitor 1.9 km
+from the runway, carry the least signal of any basket tried.
+
+That is evidence against the mechanism rather than for it. A covariate that
+works better the further away it is measured is not describing aerosol at the
+instrument; it is behaving like a general indicator of the day's conditions,
+which the meteorology largely already supplies.
+
+### What to claim
+
+The RMSE improvement is real, reproducible and worth reporting: **+7.5% against
+a weather-only corrector on held-out data**, and the fog-alarm precision gain
+that comes with it. The *aerosol coupling* claim is not established, and three
+independent checks now decline to support it — the flat stratification, the
+sensitivity to basket definition, and this inverse distance relationship.
+
+Do not present the physical mechanism. Present the number, and say the mechanism
+is unresolved on one year of data.
