@@ -89,3 +89,18 @@ def test_a_full_fit_still_produces_a_real_interval():
 def test_default_is_all_three_heads():
     # Anything served must return an interval. The shortcut is for search only.
     assert CorrectorModel().quantiles == QUANTILES
+
+
+def test_a_model_pickled_before_quantiles_existed_still_predicts():
+    """Adding an attribute to a pickled class breaks every earlier checkpoint.
+
+    The served dashboard loads `forecast_model.pkl` from disk. When
+    `quantiles` was introduced, every model saved before it unpickled without
+    the attribute and `predict` raised, so `/api/forecast` returned 503 on
+    every request until the default below.
+    """
+    m, test = _fit(QUANTILES)
+    del m.quantiles                      # exactly what an old pickle restores
+    pred = m.predict(test)               # must not raise
+    assert np.isfinite(pred.q50).all()
+    assert (pred.q90 >= pred.q10).all()

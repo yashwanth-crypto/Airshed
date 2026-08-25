@@ -184,7 +184,12 @@ class CorrectorModel(Model):
         out = {q: np.full(len(cams), np.nan) for q in QUANTILES}
         # A head that was never fitted falls back to the anchor below.
 
-        fitted = set(self.quantiles)
+        # `getattr`, not `self.quantiles`: a model pickled before this
+        # attribute existed unpickles without it, and the served dashboard
+        # loads exactly such a cached model. Adding an attribute to a class
+        # that gets pickled silently breaks every checkpoint written before
+        # it -- the API returned 503 on every forecast until this default.
+        fitted = set(getattr(self, "quantiles", QUANTILES))
         for h in np.unique(horizons):
             sel = horizons == h
             for q in fitted:
