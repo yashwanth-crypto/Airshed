@@ -8,7 +8,7 @@
 <meta name="author" content="yashwanth-crypto">
 <meta name="color-scheme" content="light dark">
 <meta property="og:title" content="Airshed — 72-hour coupled air quality forecasting for Delhi NCR">
-<meta property="og:description" content="We don't replace the physics model — we correct it. Beats raw CAMS by 29.6% RMSE on 5 of 5 seasonal folds.">
+<meta property="og:description" content="We don't replace the physics model — we correct it. Beats raw CAMS by 31.5% RMSE on 5 of 5 seasonal folds.">
 <meta property="og:type" content="article">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -234,8 +234,8 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
     <dl class="keyfacts">
       <div><dt>Forecast horizon</dt><dd>72 h<small>at 24 / 48 / 72</small></dd></div>
       <div><dt>Ground stations</dt><dd>77<small>+24 upwind corridor</small></dd></div>
-      <div><dt>Beats raw CAMS by</dt><dd>29.6%<small>RMSE, 5 of 5 folds</small></dd></div>
-      <div><dt>Beats persistence by</dt><dd>20.5%<small>RMSE, 5 of 5 folds</small></dd></div>
+      <div><dt>Beats raw CAMS by</dt><dd>31.5%<small>RMSE, 5 of 5 folds</small></dd></div>
+      <div><dt>Beats persistence by</dt><dd>20.6%<small>RMSE, 5 of 5 folds</small></dd></div>
     </dl>
   </div>
 </div>
@@ -646,10 +646,10 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
     <h2>What it actually shows you</h2>
     <p>
       Below is a real response from the live endpoint — the run issued
-      <b>2026-08-24 09:00 UTC</b>, six hours old at the time of capture, built from 77 stations
-      and read entirely from cache. Late August is monsoon, so Delhi is clean and every stage
-      probability is close to zero. That is the boring case, and a system you can only judge
-      during an episode is a system you cannot trust in June.
+      <b>2026-08-24 21:00 UTC</b>, eight hours old at the time of capture, built from 77 stations
+      and read entirely from cache. Late August is monsoon, so Delhi sits near the bottom of the
+      GRAP scale. That is the boring case, and a system you can only judge during an episode is a
+      system you cannot trust in June.
     </p>
   </div>
 
@@ -659,34 +659,39 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
       <table class="uit">
         <thead><tr><th>Lead</th><th class="num">City PM2.5 (10–90%)</th><th class="num">P(≥ III)</th><th>GRAP</th></tr></thead>
         <tbody>
-          <tr><td><b>+24 h</b></td><td class="num"><b>51.5</b> <span class="muted">22–80</span></td><td class="num">0%</td><td class="muted">below Stage I</td></tr>
-          <tr><td><b>+48 h</b></td><td class="num"><b>56.6</b> <span class="muted">30–76</span></td><td class="num">0%</td><td class="muted">below Stage I</td></tr>
-          <tr><td><b>+72 h</b></td><td class="num"><b>50.0</b> <span class="muted">26–70</span></td><td class="num">0%</td><td class="muted">below Stage I</td></tr>
+          <tr><td><b>+24 h</b></td><td class="num"><b>108.6</b> <span class="muted">46–137</span></td><td class="num">0%</td><td><span class="pill" style="background:var(--s1)">I Poor</span></td></tr>
+          <tr><td><b>+48 h</b></td><td class="num"><b>87.6</b> <span class="muted">22–140</span></td><td class="num">1%</td><td class="muted">below Stage I</td></tr>
+          <tr><td><b>+72 h</b></td><td class="num"><b>73.2</b> <span class="muted">16–121</span></td><td class="num">1%</td><td class="muted">below Stage I</td></tr>
         </tbody>
       </table>
       <p class="foot">
-        Every row is a band, never a bare number. The band is what the GRAP layer thresholds.
+        Every row is a band, never a bare number — the band is what the GRAP layer thresholds.
+        Note the +24 h row: 108.6 µg/m³ reaches Stage I but not Stage II, because Stage I is
+        declared at an even chance and Stage II needs 0.40. Those thresholds are asymmetric on
+        purpose and the interface reads them from the same config the evaluation scores against.
       </p>
     </div>
 
     <div class="panel">
       <h4>GRAP stage probability</h4>
-      <div class="prob"><span class="pill" style="background:var(--s1)">I Poor</span><div class="track"><div style="width:6.9%;background:var(--s1)"></div></div><span class="pc">6.9%</span></div>
-      <div class="prob"><span class="pill" style="background:var(--s2)">II Very Poor</span><div class="track"><div style="width:2.4%;background:var(--s2)"></div></div><span class="pc">2.4%</span></div>
-      <div class="prob"><span class="pill" style="background:var(--s3)">III Severe</span><div class="track"><div style="width:0.6%;background:var(--s3)"></div></div><span class="pc">0.0%</span></div>
-      <div class="prob"><span class="pill" style="background:var(--s4)">IV Severe+</span><div class="track"><div style="width:0.6%;background:var(--s4)"></div></div><span class="pc">0.0%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s1)">I Poor</span><div class="track"><div style="width:61.8%;background:var(--s1)"></div></div><span class="pc">61.8%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s2)">II Very Poor</span><div class="track"><div style="width:34.1%;background:var(--s2)"></div></div><span class="pc">34.1%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s3)">III Severe</span><div class="track"><div style="width:1%;background:var(--s3)"></div></div><span class="pc">0.2%</span></div>
+      <div class="prob"><span class="pill" style="background:var(--s4)">IV Severe+</span><div class="track"><div style="width:1%;background:var(--s4)"></div></div><span class="pc">0.0%</span></div>
       <p class="foot">
-        A probability per stage at each horizon — the decision, not the concentration.
+        At +24 h. Stage I clears its 0.50 bar and is declared; Stage II at 34% does not clear
+        0.40 and is not. A probability per stage is the decision — the concentration alone
+        cannot tell you whether to close schools.
       </p>
     </div>
 
     <div class="panel">
       <h4>Why — driver attribution</h4>
-      <div class="drv"><span>regional forecast (CAMS)</span><div class="track c"><div class="pos" style="width:44%"></div></div><span class="pc">+1.2</span></div>
-      <div class="drv"><span>recent local levels</span><div class="track c"><div class="neg" style="width:50%"></div></div><span class="pc">−1.4</span></div>
-      <div class="drv"><span>other weather</span><div class="track c"><div class="neg" style="width:8%"></div></div><span class="pc">−0.2</span></div>
-      <div class="drv"><span>humidity and fog</span><div class="track c"><div class="neg" style="width:4%"></div></div><span class="pc">−0.1</span></div>
-      <div class="drv"><span>time of day and season</span><div class="track c"><div class="neg" style="width:1%"></div></div><span class="pc">0.0</span></div>
+      <div class="drv"><span>recent local levels</span><div class="track c"><div class="neg" style="width:45%"></div></div><span class="pc">−0.9</span></div>
+      <div class="drv"><span>regional forecast (CAMS)</span><div class="track c"><div class="pos" style="width:30%"></div></div><span class="pc">+0.6</span></div>
+      <div class="drv"><span>humidity and fog</span><div class="track c"><div class="neg" style="width:20%"></div></div><span class="pc">−0.4</span></div>
+      <div class="drv"><span>other weather</span><div class="track c"><div class="neg" style="width:15%"></div></div><span class="pc">−0.3</span></div>
+      <div class="drv"><span>time of day and season</span><div class="track c"><div class="pos" style="width:10%"></div></div><span class="pc">+0.2</span></div>
       <p class="foot">
         Drivers explain our <i>correction to CAMS</i>, not the pollution itself. Here CAMS is
         pushing the forecast up and recent observations are pulling it back down.
@@ -702,8 +707,9 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
           <tr><td>cams_archive</td><td class="num">739</td><td class="num">2026-08-24</td></tr>
           <tr><td>meteo_archive</td><td class="num">709</td><td class="num">2026-08-24</td></tr>
           <tr><td>metar</td><td class="num">739</td><td class="num">2026-08-24</td></tr>
-          <tr><td>cams_runs</td><td class="num">2</td><td class="num">2026-08-24</td></tr>
-          <tr><td>meteo_runs</td><td class="num">2</td><td class="num">2026-08-24</td></tr>
+          <tr><td>meteo_leadmatched</td><td class="num">554</td><td class="num">2026-08-25</td></tr>
+          <tr><td>cams_runs</td><td class="num">3</td><td class="num">2026-08-25</td></tr>
+          <tr><td>meteo_runs</td><td class="num">3</td><td class="num">2026-08-25</td></tr>
         </tbody>
       </table>
       <p class="foot">
@@ -718,16 +724,19 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
     <p>
       The interface also carries a caveat we could have hidden. The forecast response includes an
       <code>input_gap</code> field reporting that the model is trained on archived CAMS and served
-      live CAMS, and that the served input currently runs about <b>21 µg/m³ low</b> at lead day 1
-      on the two run-days we have measured. Too few to correct for — so the dashboard says the
-      forecast is uncorrected rather than silently applying a bias fitted on a fortnight of
-      monsoon air.
+      live CAMS, and that the served input currently runs about <b>32 µg/m³ low</b> at lead day 2
+      on the three run-days we have measured. Far too few to correct for — twenty are required —
+      so the dashboard states the forecast is uncorrected rather than silently applying a bias
+      fitted on three days of monsoon air. That number can only be improved by the daily archive
+      job continuing to run; there is no way to backfill it.
     </p>
     <div class="note">
       <b>Replay is the demo centrepiece, and it doubles as validation.</b> Pick any past date and
-      the system rebuilds what it <i>would</i> have forecast from cache alone, then scores it
-      against what CPCB actually recorded. On the 24-hour replay shown in testing: 469
-      station-hours, model RMSE <b>30.5 µg/m³</b> against raw CAMS at <b>41.3</b>.
+      the system rebuilds what it <i>would</i> have forecast from cache alone — using the
+      meteorology genuinely in hand at issue time, not the cleaner short-lead value the archive
+      returns — then scores it against what CPCB actually recorded. Replaying 12 November 2025 at
+      24 hours: 1,418 station-hours, model RMSE <b>68.0 µg/m³</b> against raw CAMS at
+      <b>197.8</b>.
     </div>
   </div>
 </section>
@@ -773,17 +782,18 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
     <table>
       <thead><tr><th>Claim</th><th class="num">Folds better</th><th class="num">Mean gain</th><th class="num">Spread</th><th>Verdict</th></tr></thead>
       <tbody>
-        <tr class="hi"><td>Correction vs persistence</td><td class="num">5 / 5</td><td class="num">+20.5%</td><td class="num">±7.1</td><td><span class="tag ok">Holds up</span></td></tr>
-        <tr class="hi"><td>Correction vs raw CAMS</td><td class="num">5 / 5</td><td class="num">+29.6%</td><td class="num">±17.3</td><td><span class="tag ok">Holds up</span></td></tr>
-        <tr><td>Upwind fires</td><td class="num">3 / 5</td><td class="num">+1.3%</td><td class="num">±1.9</td><td><span class="tag">Cannot tell</span></td></tr>
-        <tr><td>Upwind corridor</td><td class="num">2 / 5</td><td class="num">+0.0%</td><td class="num">±0.5</td><td><span class="tag">Cannot tell</span></td></tr>
-        <tr><td>Coupled multi-output</td><td class="num">2 / 5</td><td class="num">−0.0%</td><td class="num">±0.4</td><td><span class="tag no">Does not hold</span></td></tr>
+        <tr class="hi"><td>Correction vs persistence</td><td class="num">5 / 5</td><td class="num">+20.6%</td><td class="num">±7.2</td><td><span class="tag ok">Holds up</span></td></tr>
+        <tr class="hi"><td>Correction vs raw CAMS</td><td class="num">5 / 5</td><td class="num">+31.5%</td><td class="num">±17.5</td><td><span class="tag ok">Holds up</span></td></tr>
+        <tr><td>Upwind fires</td><td class="num">3 / 5</td><td class="num">+0.9%</td><td class="num">±2.1</td><td><span class="tag">Cannot tell</span></td></tr>
+        <tr><td>Upwind corridor</td><td class="num">3 / 5</td><td class="num">+0.0%</td><td class="num">±0.4</td><td><span class="tag">Cannot tell</span></td></tr>
+        <tr><td>Coupled multi-output</td><td class="num">4 / 5</td><td class="num">−0.1%</td><td class="num">±0.9</td><td><span class="tag no">Does not hold</span></td></tr>
+        <tr><td>Short-lead meteorology was flattering us</td><td class="num">0 / 5</td><td class="num">−0.9%</td><td class="num">±0.7</td><td><span class="tag no">Confirmed cost</span></td></tr>
       </tbody>
     </table>
   </div>
 
   <div class="col">
-    <h3>The coupling, proved in the hard direction</h3>
+    <h3>The coupling: a real gain, an unproven mechanism</h3>
     <p>
       Weather-to-pollution is in every air-quality model. The direction the problem statement
       actually asks about is the other one: does knowing the aerosol load improve a
@@ -792,24 +802,44 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
     <p>
       Raw GFS visibility is <b>21.3 km RMSE</b> — the physics model is effectively blind to haze.
       Correcting it with weather alone gives <b>1.19 km</b>. Adding pollution gives
-      <b>1.08 km</b>, a <b>9.5%</b> improvement. And it passes the test that separates physics
-      from a bigger feature set: <b>the gain concentrates where the aerosol is</b> — +0.3% in
-      clean air, +8.9% in poor air. Fog-alarm recall rises from 84% to <b>91%</b>.
+      <b>1.10 km</b>, a <b>7.5%</b> improvement on held-out data. That much is solid.
     </p>
+    <p>
+      What we cannot claim is <i>why</i>. If this were aerosol scattering light, the gain would
+      concentrate where the aerosol is. It does not — it runs +4.0% in clean air and +5.0% in the
+      dirtiest, essentially flat. Two further checks agree: the result is sensitive to which
+      stations define the pollution series, and a basket of monitors <i>near the airport</i>
+      performs <b>worse</b> than a city-wide one at every radius we tried, including the monitor
+      1.9 km from the runway.
+    </p>
+    <div class="note">
+      <b>So we report the number and not the physics.</b> A covariate that works better the
+      further away it is measured is not describing aerosol at the instrument; it is behaving
+      like a general indicator of the day's conditions. The honest claim is a 7.5% RMSE
+      improvement with the mechanism unresolved on one year of data. An earlier version of this
+      page claimed the concentration result. Three independent checks later withdrew it.
+    </div>
 
     <h3>Space, and where it fails</h3>
     <p>
       Each station is deleted from the network and predicted from the others — no neighbours of
-      its own, no history of its own. Held-out error is <b>82.6 µg/m³</b>, against distance-weighted
-      interpolation at 109.6 and raw CAMS at 92.3.
+      its own, no history of its own. Held-out error is <b>81.8 µg/m³</b>, against distance-weighted
+      interpolation at 104.9 and raw CAMS at 92.3.
     </p>
     <p>
       But raw CAMS beats our graph at three of six held-out stations, and they are all the
       clean peripheral sites — the graph pulls a low-concentration outer station toward the
-      dirtier city its neighbours describe. Against an observed mean of 167 µg/m³, an error of 83
+      dirtier city its neighbours describe. Against an observed mean of 167 µg/m³, an error of 82
       is large. The surface is good enough to say which part of the city is worse this morning. It
       is not good enough to quote a number for an unmonitored block, and the interface does not
       pretend otherwise.
+    </p>
+    <p>
+      Expanding the network from 51 to 77 stations sharpened this rather than smoothing it. The
+      clean peripheral sites improved a great deal — IGI Airport T3 went 81.3 to
+      <b>59.5 µg/m³</b> as its nearest neighbour came closer — while the dirty urban hotspots got
+      <i>worse</i>, Anand Vihar 94.4 to 113.0. More neighbours means more pull toward the
+      average, which helps a station near the average and hurts one far above it.
     </p>
   </div>
 </section>
@@ -829,15 +859,19 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
   <div class="stages">
     <div><div class="sw" style="background:var(--s1)"></div><div><b>Stage I · Poor</b><small>AQI 201–300 · declared at p ≥ 0.50</small></div><div class="rec">100%<i>recall @72 h</i></div></div>
     <div><div class="sw" style="background:var(--s2)"></div><div><b>Stage II · Very Poor</b><small>AQI 301–400 · declared at p ≥ 0.40</small></div><div class="rec">98%<i>recall @72 h</i></div></div>
-    <div><div class="sw" style="background:var(--s3)"></div><div><b>Stage III · Severe</b><small>AQI 401–450 · declared at p ≥ 0.25</small></div><div class="rec">82%<i>recall @72 h</i></div></div>
-    <div><div class="sw" style="background:var(--s4)"></div><div><b>Stage IV · Severe Plus</b><small>AQI 451+ · declared at p ≥ 0.20</small></div><div class="rec">61%<i>recall @48 h</i></div></div>
+    <div><div class="sw" style="background:var(--s3)"></div><div><b>Stage III · Severe</b><small>AQI 401–450 · declared at p ≥ 0.25</small></div><div class="rec">74%<i>recall @72 h</i></div></div>
+    <div><div class="sw" style="background:var(--s4)"></div><div><b>Stage IV · Severe Plus</b><small>AQI 451+ · declared at p ≥ 0.20</small></div><div class="rec">53%<i>recall @72 h</i></div></div>
   </div>
   <div class="col">
     <div class="note">
-      <b>We report per-class recall, never overall accuracy.</b> Stage IV is rare — 18 event hours
+      <b>We report per-class recall, never overall accuracy.</b> Stage IV is rare — 17 event hours
       in the test period. A model that predicted “not Stage IV” every single time would score
-      above 99% accuracy and be worthless. And with 18 events, the Stage IV number above is a
+      above 99% accuracy and be worthless. And with 17 events, the Stage IV number above is a
       sample-size artefact, not a capability. We say so rather than headline it.
+      <br><br>
+      Stage III reads 74% recall at 66% precision. An earlier 51-station network reported 82% at
+      41% — more catches, far more false alarms. For a stage that halts construction across the
+      NCR, the second trade is the better one, and the pair of numbers has to be read together.
     </div>
   </div>
 </section>
@@ -858,9 +892,14 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
         reason is data, not architecture: observed visibility comes from one airport and is
         broadcast to every station, so it carries one city-wide signal the meteorology already
         supplies.</li>
-      <li><b>Fires help less than the physics says they should</b> — +1.3%, on 3 of 5 folds. But
-        their best fold by far is the stubble season itself, at +4.3%, which is exactly where the
+      <li><b>Fires help less than the physics says they should</b> — +0.9%, on 3 of 5 folds. But
+        their best fold by far is the stubble season itself, at +4.6%, which is exactly where the
         mechanism predicts. One burning season cannot separate that from noise.</li>
+      <li><b>Our own 48 and 72 hour numbers were mildly optimistic</b> — by 0.9%, worse on 5 of 5
+        folds. The archives hand back the <i>best available</i> forecast for each past hour, which
+        is a short-lead one, so the model was trained on cleaner inputs than production will ever
+        give it. We rebuilt the same rows with the forecast genuinely in hand 72 hours earlier and
+        measured the difference rather than leaving it as a caveat.</li>
     </ul>
     <p>
       We were also wrong in a way that is worth admitting because we caught it ourselves.
@@ -911,10 +950,12 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
     <p class="kicker">Status</p>
     <h2>Built, and what is still open</h2>
     <div class="note">
-      <b>Numbers on this page were computed on a 51-station network.</b> We expanded to 77 in
-      August 2026 and the results are being regenerated. The station set changed, so they will
-      move for reasons that have nothing to do with the model — we would rather say that than
-      quietly republish.
+      <b>Every number on this page is from the 77-station network</b>, regenerated 25 August 2026.
+      Read the absolute values with one caveat: the 26 stations added are mostly peripheral and
+      cleaner, so the holdout's mean fell from 127.4 to 115.9 µg/m³ and episode hours from 12.1%
+      to 9.5%. <b>The test set got easier.</b> Skill against the baselines is the comparable
+      quantity — and it moved in opposite directions, better against CAMS, slightly worse against
+      persistence, because clean outer stations are more persistent.
     </div>
   </div>
   <div class="scroll">
@@ -923,13 +964,14 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
       <tbody>
         <tr><td>Data spine, 7 sources</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Rebuilds any past week from cache with sockets blocked</td></tr>
         <tr><td>Correction layer + ablation</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Beats both baselines at all three horizons</td></tr>
-        <tr><td>Uncertainty calibration</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">80.0% coverage against an 80% target</td></tr>
-        <tr><td>GRAP decision layer</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Stage III at 72 h median lead</td></tr>
-        <tr><td>Spatial downscaling</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">82.6 µg/m³ leave-one-station-out</td></tr>
+        <tr><td>Uncertainty calibration</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">85.1% coverage against an 80% target</td></tr>
+        <tr><td>GRAP decision layer</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">Stage III at 72 h median lead, 66% precision</td></tr>
+        <tr><td>Spatial downscaling</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">81.8 µg/m³ leave-one-station-out</td></tr>
         <tr><td>Dashboard + replay</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">MapLibre, intervals everywhere, staleness visible</td></tr>
-        <tr><td>Network expansion to 77</td><td><span class="tag wait">Regenerating</span></td><td class="wrap-ok">Data landed; results being recomputed</td></tr>
+        <tr><td>Network expansion to 77</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">All seven results documents regenerated</td></tr>
+        <tr><td>Hyperparameter search</td><td><span class="tag ok">Done</span></td><td class="wrap-ok">24 configurations; the defaults held on test</td></tr>
         <tr><td>Second winter of ground truth</td><td><span class="tag wait">Nov 2026</span></td><td class="wrap-ok">The constraint behind every “cannot tell”</td></tr>
-        <tr><td>Hyperparameter search</td><td><span class="tag wait">Not started</span></td><td class="wrap-ok">Defaults throughout — free accuracy on the table</td></tr>
+        <tr><td>CAMS train/serve correction</td><td><span class="tag wait">3 of 20 run days</span></td><td class="wrap-ok">Cannot be backfilled; accrues one day at a time</td></tr>
       </tbody>
     </table>
   </div>
@@ -972,9 +1014,9 @@ footer{padding:48px 0 66px; border-top:1px solid var(--line); background:var(--s
 
 <script>
 const DATA = {
-  24: [["persistence",84.7],["raw CAMS",95.2],["CAMS + history",63.7],["full model",62.6]],
-  48: [["persistence",93.9],["raw CAMS",93.4],["CAMS + history",65.2],["full model",62.9]],
-  72: [["persistence",96.1],["raw CAMS",93.1],["CAMS + history",64.6],["full model",63.8]]
+  24: [["persistence",79.6],["raw CAMS",94.3],["CAMS + history",61.1],["full model",60.0]],
+  48: [["persistence",87.7],["raw CAMS",92.8],["CAMS + history",61.6],["full model",60.3]],
+  72: [["persistence",89.7],["raw CAMS",92.2],["CAMS + history",61.7],["full model",60.8]]
 };
 const W=720,H=258,L=138,R=28,T=16,B=30, MAX=100;
 const g=document.getElementById("bars");
