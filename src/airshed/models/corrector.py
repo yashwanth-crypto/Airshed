@@ -171,9 +171,10 @@ class CorrectorModel(Model):
         out = {q: np.full(len(cams), np.nan) for q in QUANTILES}
         # A head that was never fitted falls back to the anchor below.
 
+        fitted = set(self.quantiles)
         for h in np.unique(horizons):
             sel = horizons == h
-            for q in QUANTILES:
+            for q in fitted:
                 booster = self._models.get((int(h), q))
                 if booster is None:
                     # No head for this horizon: fall back to raw CAMS rather
@@ -182,6 +183,18 @@ class CorrectorModel(Model):
                     out[q][sel] = cams[sel]
                     continue
                 out[q][sel] = cams[sel] + booster.predict(matrix[sel])
+
+        # A quantile that was deliberately never fitted mirrors the median
+        # instead of the anchor. Leaving it on the anchor was silently
+        # catastrophic: `.sorted()` below reorders the triple per row, so
+        # (anchor, corrected, anchor) put the *anchor* in the median slot and
+        # every prediction came back as uncorrected CAMS. A search built on that
+        # scored 24 configurations identically and looked like a tidy null
+        # result rather than a broken one.
+        if 0.5 in fitted:
+            for q in QUANTILES:
+                if q not in fitted:
+                    out[q] = out[0.5].copy()
 
         return Quantiles(
             q10=np.clip(out[0.1], 0.0, None),
