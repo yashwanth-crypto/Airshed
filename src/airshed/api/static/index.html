@@ -336,10 +336,21 @@ async function runReplay() {
     drawGrap(data.grap);
     drawDrivers(data.drivers);
     const s = data.skill || {};
+    // Say which inputs the replay was reconstructed from. A replay built on
+    // short-lead archive values flatters live behaviour, so the share of rows
+    // using the forecast genuinely available at issue time belongs next to the
+    // score rather than in a results file.
+    const lm = s.lead_matched_share;
+    const prov = lm === null || lm === undefined
+      ? ""
+      : lm >= 0.999
+        ? ` Reconstructed with the meteorology genuinely available ${horizon} h earlier.`
+        : ` <span class="err">Only ${(lm*100).toFixed(0)}% of rows used lead-matched meteorology;`
+          + ` the rest fall back to short-lead archive values and read optimistically.</span>`;
     $("skill").innerHTML =
       `Issued ${horizon} h ahead · ${s.n ?? 0} station-hours · ` +
       `model RMSE <b>${fmt(s.rmse_model,1)}</b> µg/m³ vs raw CAMS <b>${fmt(s.rmse_cams,1)}</b> · ` +
-      `observed mean ${fmt(s.observed_mean)} µg/m³.`;
+      `observed mean ${fmt(s.observed_mean)} µg/m³.` + prov;
     $("msg").textContent = "";
     const noon = data.city_series?.[Math.floor((data.city_series.length||1)/2)]?.time;
     if (noon) loadSurface(noon);

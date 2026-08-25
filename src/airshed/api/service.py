@@ -128,6 +128,15 @@ class Service:
         if sup.is_empty():
             return {"error": f"no data for {target_date}"}
 
+        # Replay is the demo centrepiece and it doubles as validation, so it has
+        # to reconstruct what was *available*, not what is convenient. The
+        # archives return the best forecast for each past hour, which is a
+        # short-lead one, so replaying from them shows the system performing
+        # better than it can live. Substituting the forecast genuinely in hand
+        # `horizon_h` earlier closes that gap. Falls back silently per row where
+        # no lead-matched value exists, and `met_lead_matched` records which.
+        sup = feat.apply_lead_matched_meteo(sup, cfg=self.cfg)
+
         window = sup.filter(
             (pl.col("target_time").dt.date() == day) & (pl.col("horizon_h") == horizon)
         )
@@ -186,6 +195,15 @@ class Service:
                 "rmse_model": _rmse(forecast, observed, ok),
                 "rmse_cams": _rmse(cams_v, observed, ok),
                 "observed_mean": _round(float(np.nanmean(observed[ok]))) if ok.any() else None,
+                # What share of these rows were reconstructed with the forecast
+                # genuinely available at issue time. A replay is only validation
+                # if it uses what was in hand, so the number travels with the
+                # score rather than being assumed.
+                "lead_matched_share": (
+                    _round(float(window["met_lead_matched"].mean()), 3)
+                    if "met_lead_matched" in window.columns
+                    else None
+                ),
             },
             "grap": self._grap_for_day(scored),
             "drivers": self._drivers_for(window, horizon),
