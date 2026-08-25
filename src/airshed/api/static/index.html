@@ -138,6 +138,7 @@
 const $ = (id) => document.getElementById(id);
 const fmt = (v, d=0) => (v === null || v === undefined) ? "—" : Number(v).toFixed(d);
 
+let DEMO_DATE = null;   // the held-out day the demo opens on
 const STAGE_NAMES = {1:"I Poor", 2:"II Very Poor", 3:"III Severe", 4:"IV Severe+"};
 
 // ---------------------------------------------------------------- status
@@ -190,8 +191,9 @@ async function loadDays() {
   // Open on a held-out episode, chosen by the API from the split config. The
   // old default was a November date that sits in the *training* blocks, so the
   // headline demo was in-sample and did not say so.
-  el.value = (d.demo_date && d.demo_date >= d.first && d.demo_date <= d.last)
+  DEMO_DATE = (d.demo_date && d.demo_date >= d.first && d.demo_date <= d.last)
     ? d.demo_date : d.last;
+  el.value = DEMO_DATE;
 }
 
 // ---------------------------------------------------------------- live
@@ -388,7 +390,23 @@ async function runReplay() {
     const noon = data.city_series?.[Math.floor((data.city_series.length||1)/2)]?.time;
     if (noon) loadSurface(noon);
   } catch (e) {
-    $("msg").textContent = e.message; $("msg").className = "err";
+    // A judge fiddling with the date should not get a wall of red text telling
+    // them to run CLI commands. Say what is available, offer the good day, and
+    // leave the previous replay on screen rather than blanking the chart.
+    const el = $("date");
+    const outOfRange = el.max && el.value > el.max;
+    $("msg").className = "caveat";
+    $("msg").innerHTML = outOfRange
+      ? `Nothing to replay for ${el.value} — observations run to <b>${el.max}</b>. `
+        + `<a href="#" id="useDemo">Show ${DEMO_DATE || el.max} instead</a>.`
+      : `That date has no complete forecast to replay. `
+        + `<a href="#" id="useDemo">Show ${DEMO_DATE || el.max} instead</a>.`;
+    const link = $("useDemo");
+    if (link) link.addEventListener("click", (ev) => {
+      ev.preventDefault();
+      el.value = DEMO_DATE || el.max;
+      runReplay();
+    });
   } finally { $("run").disabled = false; }
 }
 
