@@ -41,7 +41,10 @@
   table { width:100%; border-collapse:collapse; font-size:13px; }
   td, th { padding:5px 4px; text-align:left; border-bottom:1px solid var(--line); }
   th { color:var(--muted); font-weight:500; font-size:12px; }
-  td.num { text-align:right; font-variant-numeric:tabular-nums; }
+  /* th too, not just td. The rule matched only `td.num`, so every numeric
+     column header stayed left-aligned above right-aligned values and sat over
+     empty space instead of over its own numbers. */
+  td.num, th.num { text-align:right; font-variant-numeric:tabular-nums; }
 
   .bar { height:9px; border-radius:5px; background:#0d1117; overflow:hidden; }
   .bar > div { height:100%; }
@@ -52,6 +55,9 @@
   .muted { color:var(--muted); }
   .note { font-size:12px; color:var(--muted); margin-top:10px; line-height:1.5; }
   .err { color:var(--s3); }
+  /* A disclosed limitation, distinct from a failure. Red says "broken";
+     amber says "we know, and here is the size of it". */
+  .caveat { color:var(--s1); font-weight:600; }
   .legend { display:flex; gap:12px; font-size:11px; color:var(--muted); margin-top:8px; flex-wrap:wrap; }
   .legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:4px; }
 </style>
@@ -233,13 +239,17 @@ async function loadLive() {
     const gap = d.input_gap;
     let gapNote = "";
     if (gap && gap.measured && !gap.corrected) {
+      // A known limitation, not a fault. It was styled `err` and led with
+      // "Uncorrected input gap", which reads as a broken system rather than a
+      // careful one -- the opposite of what disclosing it is for. Amber, and
+      // led by what it means for the reader.
       gapNote =
-        ` <span class="err">Uncorrected input gap:</span> trained on archived CAMS, ` +
-        `served live CAMS, which runs <b>${Math.abs(gap.worst_bias_ugm3).toFixed(0)} µg/m³ ` +
-        `${gap.worst_bias_ugm3 < 0 ? "low" : "high"}</b> at lead day ${gap.worst_lead_day} ` +
-        `on ${gap.run_days} run day${gap.run_days === 1 ? "" : "s"} ` +
-        `(${gap.run_days_needed} needed before correcting). These values are likely ` +
-        `${gap.worst_bias_ugm3 < 0 ? "under" : "over"}-forecast by roughly that much.`;
+        ` <span class="caveat">Known bias:</span> these values are probably ` +
+        `<b>${gap.worst_bias_ugm3 < 0 ? "under" : "over"}-stated by about ` +
+        `${Math.abs(gap.worst_bias_ugm3).toFixed(0)} µg/m³</b> at the longer leads. ` +
+        `We train on archived CAMS and serve live CAMS, and the two differ; we have ` +
+        `${gap.run_days} of the ${gap.run_days_needed} run days needed to correct for ` +
+        `it, so we state it rather than guess at a correction.`;
     } else if (gap && !gap.measured) {
       gapNote = ` <span class="muted">Input gap not yet measurable: ${gap.reason}.</span>`;
     }
