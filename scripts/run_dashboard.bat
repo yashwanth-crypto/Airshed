@@ -18,8 +18,11 @@ echo Starting Airshed on http://localhost:8018
 echo Leave this window open. Press Ctrl+C to stop.
 echo.
 
-REM Give uvicorn a moment to bind before the browser asks for the page.
-start "" /min cmd /c "timeout /t 4 >nul & start http://localhost:8018"
+REM Give uvicorn a moment to bind before the browser asks for the page. ping, not
+REM timeout: timeout.exe refuses when stdin is redirected and is shadowed by a
+REM different binary on a Git Bash PATH, and either failure opens the browser
+REM instantly at a port nothing is listening on yet.
+start "" /min cmd /c "ping -n 5 127.0.0.1 >nul & start http://localhost:8018"
 
 REM Through the interpreter shim, not .venv\Scripts\python.exe directly: Device
 REM Guard began refusing that binary on 2026-08-25 (exit 1073751882), which
