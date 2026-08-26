@@ -400,9 +400,16 @@ async function runReplay() {
     const stillFilling = date === new Date().toISOString().slice(0, 10);
     let notice = "";
     if (stillFilling) {
-      notice = covered < 24
-        ? `<div style="color:var(--muted);margin-bottom:6px">Today so far —`
-          + ` <b>${covered}</b> of 24 hours. The rest arrive as the day does.</div>`
+      // "of 24" was wrong twice over. Most of those 24 hours have not happened,
+      // so it implied a hole where there was only a future; and the hours are
+      // UTC while the reader is on IST, so at 23:00 IST -- a day that feels
+      // over -- the UTC day is 18 hours old and the line read "10 of 24".
+      // Count against what has actually elapsed, and name the clock.
+      const elapsed = new Date().getUTCHours() + 1;
+      notice = covered < elapsed
+        ? `<div style="color:var(--muted);margin-bottom:6px">Today is still filling —`
+          + ` <b>${covered}</b> of the <b>${elapsed}</b> hours elapsed so far, counted in UTC`
+          + ` (the UTC day ends at 05:30 IST). The most recent hours are still arriving.</div>`
         : "";
     } else if (covered < 12) {
       notice = `<div style="color:var(--s1);margin-bottom:6px">Only <b>${covered}</b> hour${covered === 1 ? "" : "s"}`
