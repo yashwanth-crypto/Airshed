@@ -389,14 +389,28 @@ async function runReplay() {
     // hour of data". It happened: 2026-08-25 held a single hour, the line had
     // one point and so drew nothing, and the only clue was "72 station-hours"
     // buried in the caption below it. Say it where the missing line is.
+    //
+    // Today is the case that must NOT shout. A day 10 hours old holds 10 hours
+    // because that is how many have happened, and telling someone to refill it
+    // is advice to fetch hours that do not exist yet. Red there reads as a
+    // fault in a system that is working exactly as intended -- so today gets a
+    // grey line of fact, a genuinely thin past day gets amber, and neither gets
+    // the red reserved for something actually wrong.
     const covered = (data.city_series || []).length;
-    const thin = covered < 12
-      ? `<div class="err" style="margin-bottom:6px">Only <b>${covered}</b> hour${covered === 1 ? "" : "s"}`
-        + ` of ground truth cached for this day${covered < 2 ? " — too few points to draw a line" : ""}.`
+    const stillFilling = date === new Date().toISOString().slice(0, 10);
+    let notice = "";
+    if (stillFilling) {
+      notice = covered < 24
+        ? `<div style="color:var(--muted);margin-bottom:6px">Today so far —`
+          + ` <b>${covered}</b> of 24 hours. The rest arrive as the day does.</div>`
+        : "";
+    } else if (covered < 12) {
+      notice = `<div style="color:var(--s1);margin-bottom:6px">Only <b>${covered}</b> hour${covered === 1 ? "" : "s"}`
+        + ` of ground truth cached for this day${covered < 2 ? ", too few to draw a line" : ""}.`
         + ` The chart is thin because the store is, not because the forecast is.`
-        + ` Refill with <code>airshed ingest cpcb --start ${date} --end ${date}</code>.</div>`
-      : "";
-    $("skill").innerHTML = thin +
+        + ` Refill with <code>airshed ingest cpcb --start ${date} --end ${date}</code>.</div>`;
+    }
+    $("skill").innerHTML = notice +
       `Issued ${horizon} h ahead · ${s.n ?? 0} station-hours · ` +
       `model RMSE <b>${fmt(s.rmse_model,1)}</b> µg/m³ vs raw CAMS <b>${fmt(s.rmse_cams,1)}</b> · ` +
       `observed mean ${fmt(s.observed_mean)} µg/m³.` + splitTag + prov;
