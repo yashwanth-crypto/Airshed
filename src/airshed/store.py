@@ -20,11 +20,20 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 
+import logging
+
 import polars as pl
 
 from .config import load_config
 
+log = logging.getLogger(__name__)
+
 PART_NAME = "part.parquet"
+
+# A replace that leaves a partition this much smaller is worth a line in the
+# log. Half is deliberately loose: a day legitimately loses a station or two,
+# and an alarm that fires on ordinary days is an alarm nobody reads.
+SHRINK_WARN_RATIO = 0.5
 
 
 def dataset_dir(dataset: str, base: Path | None = None) -> Path:
@@ -79,11 +88,38 @@ def write_partitioned(
         fresh = part.drop("_part_date")
         if merge_on and out.is_file():
             fresh = _merge_with_existing(fresh, out, merge_on)
+        else:
+            _warn_if_shrinking(dataset, day, out, fresh.height)
         tmp = out.with_suffix(".parquet.tmp")
         fresh.sort(time_col).write_parquet(tmp, compression="zstd")
         os.replace(tmp, out)
         written.append(out)
     return written
+
+
+def _warn_if_shrinking(dataset: str, day: dt.date, path: Path, incoming: int) -> None:
+    """Say so when a replace is about to make a partition much smaller.
+
+    A shrinking replace is sometimes right -- a backfill dropping a station that
+    turned out to be bad -- so this warns rather than refuses. What it prevents
+    is the *silent* version, which is how a 12 h rolling window ate the CPCB
+    store one tick at a time while every log line read "wrote 5 partition(s)".
+
+    Cost is a parquet footer read, not a load of the data.
+    """
+    if not path.is_file():
+        return
+    try:
+        existing = pl.scan_parquet(path).select(pl.len()).collect().item()
+    except Exception:  # pragma: no cover - unreadable file is the writer's problem
+        return
+    if existing and incoming < existing * SHRINK_WARN_RATIO:
+        log.warning(
+            "%s %s: replacing %d rows with %d (%.0f%% smaller). If this is a "
+            "partial window rather than a whole day, it needs merge_on -- a "
+            "replace deletes the rows outside the window.",
+            dataset, day, existing, incoming, 100 * (1 - incoming / existing),
+        )
 
 
 def _merge_with_existing(

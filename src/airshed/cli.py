@@ -339,6 +339,11 @@ def health() -> None:
     # healthy for another 36 hours. That happened three times in two days.
     worst = max(worst, _report_loop_state())
 
+    # Are the recent days actually whole? A partition that exists counts as
+    # cached by every backfill, so a day hollowed out to one hour is invisible
+    # to every other check here and is never repaired by itself.
+    worst = max(worst, _report_observation_completeness())
+
     if not os.environ.get("AIRSHED_BACKUP_DIR"):
         console.print(
             "[yellow]AIRSHED_BACKUP_DIR is not set[/] — the run stores exist on "
@@ -346,6 +351,52 @@ def health() -> None:
         )
         worst = max(worst, 1)
     raise typer.Exit(worst)
+
+
+MIN_OBS_HOURS = 18
+OBS_CHECK_DAYS = 7
+
+
+def _report_observation_completeness() -> int:
+    """Flag recent CPCB days holding suspiciously few hours.
+
+    Existence is not completeness, and every other check here only asks about
+    existence. A day truncated to a single hour still satisfies `available_dates`,
+    still counts as cached by `backfill(skip_existing=True)`, and still lets the
+    forecast serve — on lag features built from almost nothing.
+
+    Today is excluded because it is legitimately partial, and a threshold below
+    24 h is deliberate: stations drop out, and R6 says a real gap stays a gap.
+    """
+    today = dt.date.today()
+    start = today - dt.timedelta(days=OBS_CHECK_DAYS)
+    obs = store.read_range("cpcb", start, today - dt.timedelta(days=1))
+    if obs.is_empty():
+        console.print("[red]observations: NONE cached for the last week[/]")
+        return 2
+
+    per_day = (
+        obs.with_columns(pl.col("time").dt.date().alias("day"))
+        .group_by("day")
+        .agg(pl.col("time").n_unique().alias("hours"))
+        .sort("day")
+    )
+    thin = per_day.filter(pl.col("hours") < MIN_OBS_HOURS)
+    if thin.is_empty():
+        console.print(
+            f"[green]observations: complete[/] — {per_day.height} of the last "
+            f"{OBS_CHECK_DAYS} days, all at least {MIN_OBS_HOURS} h"
+        )
+        return 0
+    listed = ", ".join(
+        f"{r['day']} ({r['hours']} h)" for r in thin.head(4).iter_rows(named=True)
+    )
+    console.print(
+        f"[yellow]observations: {thin.height} thin day(s)[/] — {listed}. "
+        "Repair with `airshed ingest cpcb --start <day> --end <day>`; a partition "
+        "that exists is never refilled by a plain backfill."
+    )
+    return 1
 
 
 def _report_loop_state() -> int:

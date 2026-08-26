@@ -384,7 +384,19 @@ async function runReplay() {
         ? ` Reconstructed with the meteorology genuinely available ${horizon} h earlier.`
         : ` <span class="err">Only ${(lm*100).toFixed(0)}% of rows used lead-matched meteorology;`
           + ` the rest fall back to short-lead archive values and read optimistically.</span>`;
-    $("skill").innerHTML =
+    // A day with almost no cached ground truth draws an empty chart, and an
+    // empty chart reads as "the system is broken" rather than "this day has one
+    // hour of data". It happened: 2026-08-25 held a single hour, the line had
+    // one point and so drew nothing, and the only clue was "72 station-hours"
+    // buried in the caption below it. Say it where the missing line is.
+    const covered = (data.city_series || []).length;
+    const thin = covered < 12
+      ? `<div class="err" style="margin-bottom:6px">Only <b>${covered}</b> hour${covered === 1 ? "" : "s"}`
+        + ` of ground truth cached for this day${covered < 2 ? " — too few points to draw a line" : ""}.`
+        + ` The chart is thin because the store is, not because the forecast is.`
+        + ` Refill with <code>airshed ingest cpcb --start ${date} --end ${date}</code>.</div>`
+      : "";
+    $("skill").innerHTML = thin +
       `Issued ${horizon} h ahead · ${s.n ?? 0} station-hours · ` +
       `model RMSE <b>${fmt(s.rmse_model,1)}</b> µg/m³ vs raw CAMS <b>${fmt(s.rmse_cams,1)}</b> · ` +
       `observed mean ${fmt(s.observed_mean)} µg/m³.` + splitTag + prov;
