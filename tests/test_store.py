@@ -66,3 +66,79 @@ def test_partition_by_issue_date_keeps_a_run_in_one_file(tmp_path):
     )
     paths = store.write_partitioned(df, "runs", base=tmp_path, partition_col="issue_time")
     assert len(paths) == 1, "one forecast run must land in exactly one partition"
+
+
+# -- partial writes ---------------------------------------------------------
+def _hours(day: dt.date, hours: list[int], station: str = "DL001", value: float = 1.0):
+    times = [
+        dt.datetime(day.year, day.month, day.day, h, tzinfo=dt.timezone.utc)
+        for h in hours
+    ]
+    return pl.DataFrame(
+        {
+            "time": times,
+            "station_id": [station] * len(times),
+            "value": [value] * len(times),
+        }
+    )
+
+
+def test_a_partial_write_without_merge_still_replaces_the_day(tmp_path):
+    """The existing contract, pinned so the merge option cannot change it.
+
+    A backfill holds the whole day and must be able to replace it outright,
+    including dropping a station that turned out to be bad.
+    """
+    day = dt.date(2024, 11, 1)
+    store.write_partitioned(_hours(day, list(range(24))), "demo", base=tmp_path)
+    store.write_partitioned(_hours(day, [23]), "demo", base=tmp_path)
+    got = store.read_range("demo", day, day, base=tmp_path)
+    assert got.height == 1
+
+
+def test_a_rolling_window_write_keeps_the_hours_outside_it(tmp_path):
+    """The bug this exists to stop, in miniature.
+
+    The live sync fetches a rolling 12 h window every 30 minutes. Replacing the
+    day wholesale meant each tick deleted whatever part of that day the window
+    had rolled past: the store held 2026-08-25 complete in the morning and one
+    hour of it by evening, and the dashboard's replay chart drew nothing because
+    a single point is not a line.
+    """
+    day = dt.date(2024, 11, 1)
+    store.write_partitioned(_hours(day, list(range(24))), "demo", base=tmp_path)
+    store.write_partitioned(
+        _hours(day, [22, 23]), "demo", base=tmp_path, merge_on=("station_id", "time")
+    )
+    got = store.read_range("demo", day, day, base=tmp_path)
+    assert got.height == 24, "hours outside the window must survive the write"
+    assert sorted(got["time"].dt.hour().to_list()) == list(range(24))
+
+
+def test_a_merged_write_prefers_the_incoming_value(tmp_path):
+    """OpenAQ revises provisional readings; the newer number has to win."""
+    day = dt.date(2024, 11, 1)
+    store.write_partitioned(_hours(day, [10], value=1.0), "demo", base=tmp_path)
+    store.write_partitioned(
+        _hours(day, [10], value=2.0), "demo", base=tmp_path,
+        merge_on=("station_id", "time"),
+    )
+    got = store.read_range("demo", day, day, base=tmp_path)
+    assert got.height == 1
+    assert got["value"].to_list() == [2.0]
+
+
+def test_a_merged_write_keeps_other_stations(tmp_path):
+    """A window that returned only one station must not evict the others."""
+    day = dt.date(2024, 11, 1)
+    store.write_partitioned(
+        pl.concat([_hours(day, [5], "DL001"), _hours(day, [5], "DL002")]),
+        "demo", base=tmp_path,
+    )
+    store.write_partitioned(
+        _hours(day, [5], "DL001", value=9.0), "demo", base=tmp_path,
+        merge_on=("station_id", "time"),
+    )
+    got = store.read_range("demo", day, day, base=tmp_path)
+    assert sorted(got["station_id"].to_list()) == ["DL001", "DL002"]
+    assert got.filter(pl.col("station_id") == "DL001")["value"].to_list() == [9.0]

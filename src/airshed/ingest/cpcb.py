@@ -723,11 +723,19 @@ def fetch_recent(
 
 
 def sync_recent(hours: int = 72, cfg: Config | None = None) -> list[Path]:
-    """Fetch and cache recent observations so the live forecast has history."""
+    """Fetch and cache recent observations so the live forecast has history.
+
+    Merged into the partitions rather than replacing them. This window is a
+    rolling one -- 12 h on every loop tick -- so the day at its trailing edge is
+    only partly covered, and a wholesale replace deletes the hours that fall
+    outside it. It did: the store held 2026-08-25 complete in the morning and a
+    single hour of it by evening, because every tick rewrote that day with
+    whatever slice the window still touched.
+    """
     df = fetch_recent(hours=hours, cfg=cfg)
     if df.is_empty():
         return []
-    return write_partitioned(df, DATASET)
+    return write_partitioned(df, DATASET, merge_on=("station_id", "time"))
 
 
 # ---------------------------------------------------------------------------

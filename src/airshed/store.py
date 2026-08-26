@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 
 import polars as pl
@@ -41,6 +42,7 @@ def write_partitioned(
     time_col: str = "time",
     base: Path | None = None,
     partition_col: str | None = None,
+    merge_on: Sequence[str] | None = None,
 ) -> list[Path]:
     """Write `df` partitioned by the UTC date of `partition_col` (default `time_col`).
 
@@ -49,6 +51,18 @@ def write_partitioned(
 
     A forecast-run dataset partitions by *issue* date instead of valid time, so
     that one model run is one file and re-fetching a run replaces it cleanly.
+
+    **Replacing wholesale is only safe when the caller holds the whole day.**
+    A backfill does; a rolling-window sync does not, and replacing a day with
+    the slice of it that happens to fall inside the window deletes the rest.
+    That is not hypothetical: a 12 h live sync ran every 30 minutes and quietly
+    ate the CPCB store from behind, leaving 2026-08-25 with a single hour of the
+    24 it had held that morning, and 16 of the last 41 days short.
+
+    Pass `merge_on` with the columns that identify a row -- for observations,
+    `("station_id", "time")` -- and each partition is unioned with what is
+    already on disk instead, the incoming row winning any collision so a revised
+    value still replaces a provisional one.
     """
     if df.is_empty():
         return []
@@ -62,11 +76,42 @@ def write_partitioned(
     for (day,), part in with_date.group_by(["_part_date"], maintain_order=True):
         out = partition_path(dataset, day, base)
         out.parent.mkdir(parents=True, exist_ok=True)
+        fresh = part.drop("_part_date")
+        if merge_on and out.is_file():
+            fresh = _merge_with_existing(fresh, out, merge_on)
         tmp = out.with_suffix(".parquet.tmp")
-        part.drop("_part_date").sort(time_col).write_parquet(tmp, compression="zstd")
+        fresh.sort(time_col).write_parquet(tmp, compression="zstd")
         os.replace(tmp, out)
         written.append(out)
     return written
+
+
+def _merge_with_existing(
+    fresh: pl.DataFrame, path: Path, merge_on: Sequence[str]
+) -> pl.DataFrame:
+    """Union a partial write with the partition already on disk.
+
+    Incoming rows are kept ahead of cached ones so a collision resolves to the
+    newer value -- OpenAQ revises a provisional reading often enough that
+    preferring the cached copy would freeze the first number we ever saw.
+
+    A partition unreadable for any reason is treated as absent rather than
+    fatal: losing the merge costs one window of history, and refusing to write
+    costs every window after it.
+    """
+    try:
+        cached = pl.read_parquet(path)
+    except Exception:  # pragma: no cover - corrupt or half-written file
+        return fresh
+    if cached.is_empty():
+        return fresh
+    keys = [c for c in merge_on if c in fresh.columns and c in cached.columns]
+    if len(keys) != len(merge_on):
+        # Without every key column the union cannot be deduplicated safely, and
+        # silently dropping rows would be worse than the replace it fixes.
+        return fresh
+    combined = pl.concat([fresh, cached], how="diagonal_relaxed")
+    return combined.unique(subset=list(keys), keep="first")
 
 
 def read_range(
