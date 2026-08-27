@@ -363,6 +363,13 @@ class Service:
             "horizons": by_horizon,
             "drivers": self._live_drivers(sup),
             "input_gap": self._input_gap(),
+            # Old observations have two very different causes and only one of
+            # them is ours. If the archive loop is running and checking in, it
+            # has already fetched everything upstream is offering and the lag is
+            # CPCB's; telling the operator to run a sync would waste their time
+            # on a feed that has nothing newer. If it is *not* running, that is
+            # the actionable case, and it is the one worth naming.
+            "archive_loop": self._loop_state(),
             # Sent so the interface declares stages by the same rule the
             # evaluation does. It previously hardcoded a flat 0.25 and had
             # drifted from the configured thresholds, which are deliberately
@@ -372,6 +379,21 @@ class Service:
             "stage_thresholds": {
                 str(k): v for k, v in grap_eval.DEFAULT_THRESHOLDS.items()
             },
+        }
+
+    def _loop_state(self) -> dict:
+        """Is the archive job running? Read from its lock, never fetched."""
+        from ..procs import lock_state
+
+        state = lock_state(self.cfg.data_root / "archive.lock")
+        # A loop alive but silent for longer than a couple of ticks is not
+        # evidence of anything, so it is reported as unknown rather than as
+        # working. Better a blank than a false reassurance on a stale page.
+        checked_in = state["age_min"]
+        return {
+            "running": bool(state["running"]) and (checked_in or 0) <= 90,
+            "pid": state["pid"],
+            "last_check_in_min": None if checked_in is None else round(checked_in),
         }
 
     def _input_gap(self) -> dict:

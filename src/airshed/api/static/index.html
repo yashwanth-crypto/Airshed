@@ -255,11 +255,31 @@ async function loadLive() {
     } else if (gap && !gap.measured) {
       gapNote = ` <span class="muted">Input gap not yet measurable: ${gap.reason}.</span>`;
     }
+    // Stale observations have two causes and only one is actionable. If the
+    // archive job is running and checking in, it has already fetched everything
+    // upstream is offering -- CPCB's feed reaches OpenAQ hours late, and on
+    // 2026-08-27 it sat 16 h behind with the loop working perfectly. Telling the
+    // operator to run a sync there sends them to refresh a feed that has nothing
+    // newer, and makes a working system look broken. Only name a command when
+    // there is actually something to run.
+    const loop = d.archive_loop;
+    let staleNote = "";
+    if (d.stale && loop && loop.running) {
+      staleNote =
+        ` <span class="caveat">Upstream lag, not a cache problem:</span> the archive job is ` +
+        `running (checked in ${loop.last_check_in_min} min ago) and has fetched everything ` +
+        `CPCB has published. Their feed reaches OpenAQ hours behind real time.`;
+    } else if (d.stale && loop && !loop.running) {
+      staleNote =
+        ` <span class="err">The archive job is not running</span>, so nothing is fetching new ` +
+        `observations. Start it with <code>scripts\\run_archive_hidden.vbs</code>.`;
+    } else if (d.stale) {
+      staleNote = " Run <code>airshed ingest live</code> and <code>airshed archive</code> to refresh.";
+    }
     $("liveNote").innerHTML =
       `Issued from observations to <b>${new Date(d.issued).toISOString().slice(0,16).replace("T"," ")} UTC</b> ` +
-      `(<span class="${d.stale ? "err" : ""}">${age} h ago</span>). ` +
-      (d.stale ? "Run <code>airshed ingest live</code> and <code>airshed archive</code> to refresh." : "") +
-      gapNote;
+      `(<span class="${d.stale ? "err" : ""}">${age} h ago</span>).` +
+      staleNote + gapNote;
   } catch (e) {
     $("live").innerHTML = `<span class="err">${e.message}</span>`;
     $("liveNote").textContent = "Needs an archived run and recent observations: airshed archive, then airshed ingest live.";
