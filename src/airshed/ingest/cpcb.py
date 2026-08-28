@@ -906,6 +906,59 @@ def backfill(
     return written
 
 
+def heal_incomplete(
+    days: int = 10,
+    min_hours: int = 24,
+    cfg: Config | None = None,
+) -> list[Path]:
+    """Refill recent days the live path left short, from the bulk archive.
+
+    The live API is a rolling window: 12 h on each loop tick, 96 h on a full
+    pass. Whatever it misses while upstream is stalled falls out of that window
+    within days and is then never asked for again -- CAMS, meteorology and METAR
+    all get an archive top-up on every pass, and CPCB never did. So an outage
+    like 2026-08-27, when OpenAQ published nothing for a day, would have left a
+    permanent hole in the ground truth even though the S3 archive publishes those
+    same hours a few days later.
+
+    Only days holding fewer than `min_hours` distinct hours are re-fetched, so
+    the normal cost is zero requests. Today is excluded: it is legitimately
+    partial. Writes merge, so a day the archive has not published yet costs
+    nothing and cannot truncate what the live path already caught.
+    """
+    cfg = cfg or load_config()
+    today = dt.date.today()
+    healed: list[Path] = []
+    for offset in range(1, days + 1):
+        day = today - dt.timedelta(days=offset)
+        path = partition_path(DATASET, day)
+        held = 0
+        if path.is_file():
+            try:
+                held = pl.read_parquet(path, columns=["time"])["time"].n_unique()
+            except Exception:
+                held = 0
+        if held >= min_hours:
+            continue
+        df = fetch_archive(day, day, cfg=cfg)
+        rate = getattr(fetch_archive, "last_failure_rate", 0.0)
+        if rate > MAX_FETCH_FAILURE_RATE:
+            log.error(
+                "cpcb heal %s: %.0f%% of fetches failed, above the %.0f%% limit "
+                "-- not writing", day, 100 * rate, 100 * MAX_FETCH_FAILURE_RATE,
+            )
+            continue
+        if df.is_empty():
+            log.info("cpcb heal %s: %d h held, archive has nothing yet", day, held)
+            continue
+        written = write_partitioned(df, DATASET, merge_on=("station_id", "time"))
+        after = pl.read_parquet(path, columns=["time"])["time"].n_unique()
+        if after > held:
+            log.info("cpcb heal %s: %d h -> %d h", day, held, after)
+            healed += written
+    return healed
+
+
 def backfill_new_stations(
     start: dt.date | str,
     end: dt.date | str,

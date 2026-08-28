@@ -148,6 +148,19 @@ def _one_pass() -> int:
             log.error("%s top-up failed: %s", name, str(exc)[:300])
             failures += 1
 
+    # Heal any recent day the live path left short. CPCB is the one dataset with
+    # no archive top-up above, so an upstream stall used to leave a hole that
+    # nothing would ever fill: the live window rolls past it within days, and the
+    # S3 archive publishes those hours only afterwards. Costs no requests on a
+    # healthy week, because only days short of a full 24 h are re-fetched.
+    try:
+        healed = cpcb.heal_incomplete(days=RECENT_DAYS)
+        if healed:
+            log.info("cpcb: healed %d incomplete partition(s)", len(healed))
+    except Exception as exc:
+        log.error("cpcb heal failed: %s", str(exc)[:300])
+        failures += 1
+
     # Lead-matched meteorology. No lag is needed and that was checked, not
     # assumed: `previous_day3` returns 24/24 non-null for *today's* valid hours,
     # because the run from three days ago already forecast this far ahead. Only

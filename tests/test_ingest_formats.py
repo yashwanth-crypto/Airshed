@@ -204,3 +204,93 @@ def test_an_unreadable_cache_forces_a_rebuild(tmp_path):
     path = tmp_path / "openaq_sensors.json"
     path.write_text("{not json", encoding="utf-8")
     assert cpcb._read_sensor_cache(path) == ({}, None)
+
+
+# -- healing days the live window rolled past -------------------------------
+def _stub_store(monkeypatch, tmp_path, held: dict[dt.date, int]):
+    """A fake partition per day, holding `held[day]` distinct hours."""
+    for day, hours in held.items():
+        path = tmp_path / f"date={day.isoformat()}" / "part.parquet"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        times = [
+            dt.datetime(day.year, day.month, day.day, h, tzinfo=dt.timezone.utc)
+            for h in range(hours)
+        ]
+        pl.DataFrame({"time": times, "value": [1.0] * hours}).write_parquet(path)
+    monkeypatch.setattr(
+        cpcb, "partition_path", lambda ds, day, base=None: tmp_path / f"date={day.isoformat()}" / "part.parquet"
+    )
+
+
+def test_a_complete_day_is_not_refetched(monkeypatch, tmp_path):
+    """The normal week must cost zero archive requests."""
+    day = dt.date.today() - dt.timedelta(days=1)
+    _stub_store(monkeypatch, tmp_path, {day: 24})
+    asked = []
+    monkeypatch.setattr(cpcb, "fetch_archive", lambda *a, **k: asked.append(a) or pl.DataFrame())
+    cpcb.heal_incomplete(days=1)
+    assert asked == []
+
+
+def test_a_short_day_is_refetched_and_merged(monkeypatch, tmp_path):
+    """The 2026-08-27 case: the live window rolls past, the archive catches up."""
+    day = dt.date.today() - dt.timedelta(days=1)
+    _stub_store(monkeypatch, tmp_path, {day: 2})
+    asked, wrote = [], []
+    monkeypatch.setattr(
+        cpcb, "fetch_archive",
+        lambda s, e, **k: asked.append(s) or pl.DataFrame(
+            {"time": [dt.datetime(day.year, day.month, day.day, h, tzinfo=dt.timezone.utc)
+                      for h in range(24)], "value": [1.0] * 24}
+        ),
+    )
+    monkeypatch.setattr(cpcb, "write_partitioned", lambda df, ds, **k: wrote.append(k) or [])
+    cpcb.heal_incomplete(days=1)
+    assert asked == [day]
+    # Merging is the whole point: a replace would truncate what the live path
+    # already caught whenever the archive is itself incomplete.
+    assert wrote and wrote[0].get("merge_on") == ("station_id", "time")
+
+
+def test_today_is_never_healed(monkeypatch, tmp_path):
+    """Today holds few hours because few have happened, not because of a gap.
+
+    Days with no partition at all *are* fetched -- that is a genuine hole -- so
+    the assertion is about today specifically, not about the request count.
+    """
+    today = dt.date.today()
+    _stub_store(monkeypatch, tmp_path, {today: 3})
+    asked = []
+    monkeypatch.setattr(cpcb, "fetch_archive", lambda s, e, **k: asked.append(s) or pl.DataFrame())
+    cpcb.heal_incomplete(days=10)
+    assert today not in asked
+    assert asked, "days missing entirely should still be attempted"
+
+
+def test_an_archive_that_has_nothing_yet_writes_nothing(monkeypatch, tmp_path):
+    """A day the archive has not published must not truncate what we hold."""
+    day = dt.date.today() - dt.timedelta(days=1)
+    _stub_store(monkeypatch, tmp_path, {day: 2})
+    wrote = []
+    monkeypatch.setattr(cpcb, "fetch_archive", lambda *a, **k: pl.DataFrame())
+    monkeypatch.setattr(cpcb, "write_partitioned", lambda df, ds, **k: wrote.append(k) or [])
+    cpcb.heal_incomplete(days=1)
+    assert wrote == []
+
+
+def test_a_failed_fetch_is_not_written(monkeypatch, tmp_path):
+    """Above the failure-rate limit, writing would convert a network blip into
+    permanent invisible loss -- the same guard `backfill` applies."""
+    day = dt.date.today() - dt.timedelta(days=1)
+    _stub_store(monkeypatch, tmp_path, {day: 2})
+    wrote = []
+
+    def flaky(*a, **k):
+        flaky.last_failure_rate = 0.9
+        return pl.DataFrame({"time": [dt.datetime(2026, 1, 1, tzinfo=dt.timezone.utc)], "value": [1.0]})
+
+    flaky.last_failure_rate = 0.9
+    monkeypatch.setattr(cpcb, "fetch_archive", flaky)
+    monkeypatch.setattr(cpcb, "write_partitioned", lambda df, ds, **k: wrote.append(k) or [])
+    cpcb.heal_incomplete(days=1)
+    assert wrote == []
