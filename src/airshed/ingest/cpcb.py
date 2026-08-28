@@ -607,6 +607,77 @@ def apply_ids_to_config(mapping: dict[str, int], cfg: Config | None = None) -> i
 
 SENSOR_CACHE = "openaq_sensors.json"
 
+# A PM2.5 sensor silent this long is a decommissioned instrument, not a station
+# having a bad week. A CAAQMS location keeps every sensor it has ever had, so
+# 77 stations resolved to 130 sensor ids and the live sync asked all of them
+# every half hour -- 53 of those calls could only ever return nothing, and the
+# wasted round trips showed up as 408s from OpenAQ. Generous on purpose: R6 says
+# stations go offline and come back, and a month of silence is not proof of
+# death when the cost of being wrong is a station missing from the live path.
+SENSOR_STALE_DAYS = 30
+
+# ...which is only safe because the cache expires. Without this, a sensor pruned
+# while an instrument was down would stay pruned after it came back, and the gap
+# would look exactly like an outage.
+SENSOR_CACHE_MAX_AGE_DAYS = 7
+
+
+def _read_sensor_cache(path: Path) -> tuple[dict[str, list[int]], dt.datetime | None]:
+    """The cached mapping and when it was built.
+
+    Caches written before the file carried a build time come back with `None`,
+    which reads as infinitely old and forces one rebuild. That is the intent:
+    they were built without the staleness filter and hold sensors that have been
+    silent for years.
+    """
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}, None
+    if isinstance(raw, dict) and "stations" in raw:
+        built = None
+        try:
+            built = dt.datetime.fromisoformat(str(raw.get("built")))
+        except (TypeError, ValueError):
+            built = None
+        return {k: list(v) for k, v in raw["stations"].items()}, built
+    return {k: list(v) for k, v in raw.items()}, None  # pre-`built` format
+
+
+def _live_pm25_sensors(sensors: list[dict], station_id: str) -> list[int]:
+    """PM2.5 sensor ids that have reported recently enough to be worth asking.
+
+    A CAAQMS location accumulates a sensor per instrument it has ever carried,
+    and OpenAQ hands back all of them: DL002 returns the instrument that stopped
+    in January 2020 alongside the one reporting this morning. Both were queried
+    on every live sync, twice an hour, forever.
+
+    `datetimeLast` comes free in the same payload, so the filter costs no extra
+    request. A sensor with no `datetimeLast` at all is kept -- unknown is not
+    evidence of death, and dropping a station is the more expensive mistake.
+    """
+    cutoff = dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=SENSOR_STALE_DAYS)
+    live, dropped = [], []
+    for s in sensors:
+        if s.get("parameter", {}).get("name") != PARAMETER:
+            continue
+        last = (s.get("datetimeLast") or {}).get("utc")
+        if not last:
+            live.append(s["id"])
+            continue
+        try:
+            seen = dt.datetime.fromisoformat(str(last).replace("Z", "+00:00"))
+        except ValueError:
+            live.append(s["id"])
+            continue
+        (live if seen >= cutoff else dropped).append(s["id"])
+    if dropped:
+        log.info(
+            "%s: skipping %d decommissioned PM2.5 sensor(s) %s",
+            station_id, len(dropped), dropped,
+        )
+    return live
+
 
 def sensor_ids(cfg: Config | None = None, refresh: bool = False) -> dict[str, list[int]]:
     """station_id -> PM2.5 sensor ids, cached on disk.
@@ -619,7 +690,7 @@ def sensor_ids(cfg: Config | None = None, refresh: bool = False) -> dict[str, li
     cfg = cfg or load_config()
     path = cfg.processed_dir / SENSOR_CACHE
     if path.is_file() and not refresh:
-        cached = json.loads(path.read_text(encoding="utf-8"))
+        cached, built = _read_sensor_cache(path)
         # A cache that predates a station is worse than no cache: the live sync
         # would keep succeeding while quietly never fetching that station, and
         # the gap looks exactly like a CAAQMS outage (R6). The 2026-08 expansion
@@ -627,13 +698,21 @@ def sensor_ids(cfg: Config | None = None, refresh: bool = False) -> dict[str, li
         # the last four days, because those come from the live path.
         wanted = {s.id for s in cfg.stations if s.resolved}
         missing = wanted - set(cached)
-        if cached and not missing:
+        age_days = (
+            float("inf") if built is None
+            else (dt.datetime.now(dt.timezone.utc) - built).total_seconds() / 86400
+        )
+        if cached and not missing and age_days <= SENSOR_CACHE_MAX_AGE_DAYS:
             return {k: list(v) for k, v in cached.items()}
-        if cached:
+        if cached and missing:
             log.info(
                 "sensor cache is missing %d configured station(s) (%s) — refreshing",
                 len(missing), ", ".join(sorted(missing)[:6]),
             )
+        elif cached:
+            # Expiry is what makes pruning safe: a sensor dropped while its
+            # instrument was down is reconsidered within the week.
+            log.info("sensor cache is %.0f days old — refreshing", age_days)
 
     src = cfg.source("cpcb")
     headers = {"X-API-Key": _api_key()}
@@ -641,27 +720,45 @@ def sensor_ids(cfg: Config | None = None, refresh: bool = False) -> dict[str, li
     for station in cfg.stations:
         if not station.resolved:
             continue
+        sensors = None
         try:
             payload = get_json(
                 f"{src['api_url']}/locations/{station.openaq_id}/sensors", headers=headers
             )
+            sensors = payload.get("results", [])
         except Exception as exc:
+            # The sub-endpoint fails for some locations while the location
+            # object itself lists the same sensors inline. OpenAQ answers 500
+            # for Wave City (UP012) and has for weeks, which cost us that
+            # station on the live path entirely — it is recoverable, so try.
             log.warning("sensor lookup failed for %s: %s", station.id, str(exc)[:120])
+            try:
+                loc = get_json(
+                    f"{src['api_url']}/locations/{station.openaq_id}", headers=headers
+                )
+                sensors = (loc.get("results") or [{}])[0].get("sensors", [])
+                log.info("recovered %s from the location object", station.id)
+            except Exception as exc2:
+                log.warning("location fallback failed for %s: %s", station.id, str(exc2)[:120])
+        if sensors is None:
             # Record the attempt with no ids. Leaving the key out entirely would
             # make the staleness check above see a permanently missing station
             # and refresh all seventy-odd lookups on every single live sync.
-            # OpenAQ currently answers 500 for Wave City (UP012), which is
-            # exactly that case.
             mapping.setdefault(station.id, [])
             continue
-        ids = [
-            s["id"]
-            for s in payload.get("results", [])
-            if s.get("parameter", {}).get("name") == PARAMETER
-        ]
-        mapping[station.id] = ids
+        mapping[station.id] = _live_pm25_sensors(sensors, station.id)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(mapping, indent=1), encoding="utf-8")
+    path.write_text(
+        json.dumps(
+            {
+                "built": dt.datetime.now(dt.timezone.utc).isoformat(),
+                "stale_after_days": SENSOR_STALE_DAYS,
+                "stations": mapping,
+            },
+            indent=1,
+        ),
+        encoding="utf-8",
+    )
     usable = sum(1 for v in mapping.values() if v)
     log.info(
         "cached PM2.5 sensor ids for %d of %d stations (%d had none; "

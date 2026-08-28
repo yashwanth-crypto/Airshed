@@ -9,6 +9,7 @@ vanished exactly this way: the S3 archive writes "+05:30", the v3 API writes
 from __future__ import annotations
 
 import datetime as dt
+import json
 
 import polars as pl
 
@@ -121,3 +122,85 @@ def test_chunks_never_exceed_the_api_day_cap():
     spans = [span for _start, span in fires._chunks(dt.date(2025, 11, 1), dt.date(2025, 11, 30))]
     assert spans and max(spans) <= fires.MAX_DAY_RANGE
     assert sum(spans) == 30, "chunks must tile the range exactly, with no gaps"
+
+
+# -- live sensor selection --------------------------------------------------
+def _sensor(sid: int, last: str | None, parameter: str = "pm25") -> dict:
+    entry = {"id": sid, "parameter": {"name": parameter}}
+    if last is not None:
+        entry["datetimeLast"] = {"utc": last}
+    return entry
+
+
+def _iso(days_ago: float) -> str:
+    return (
+        dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=days_ago)
+    ).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def test_a_decommissioned_sensor_is_not_queried_every_sync():
+    """A CAAQMS location keeps every instrument it has ever carried.
+
+    DL002 hands back the sensor that stopped in January 2020 alongside the one
+    reporting this morning, and both were asked for data twice an hour. Across
+    77 stations that was 130 requests where 77 would do, and the wasted round
+    trips came back as 408s.
+    """
+    live, dead = 12234753, 14878
+    got = cpcb._live_pm25_sensors(
+        [_sensor(dead, "2020-01-20T07:15:00Z"), _sensor(live, _iso(0.2))], "DL002"
+    )
+    assert got == [live]
+
+
+def test_a_sensor_silent_for_a_fortnight_is_kept():
+    """R6: stations go offline and come back. Two weeks is not proof of death."""
+    assert cpcb._live_pm25_sensors([_sensor(1, _iso(14))], "DL001") == [1]
+
+
+def test_a_sensor_with_no_last_seen_date_is_kept():
+    """Unknown is not evidence of death, and dropping a live station costs more."""
+    assert cpcb._live_pm25_sensors([_sensor(1, None)], "UP012") == [1]
+
+
+def test_other_parameters_are_ignored():
+    got = cpcb._live_pm25_sensors(
+        [_sensor(1, _iso(0.1), "pm10"), _sensor(2, _iso(0.1), "pm25")], "DL001"
+    )
+    assert got == [2]
+
+
+def test_an_unparsable_last_seen_date_keeps_the_sensor():
+    assert cpcb._live_pm25_sensors([_sensor(1, "not a date")], "DL001") == [1]
+
+
+# -- sensor cache format ----------------------------------------------------
+def test_a_cache_without_a_build_time_is_treated_as_expired(tmp_path):
+    """Pre-expiry caches were built with no staleness filter at all.
+
+    They hold sensors silent for years, so they have to be rebuilt once rather
+    than trusted forever.
+    """
+    path = tmp_path / "openaq_sensors.json"
+    path.write_text(json.dumps({"DL001": [1, 2]}), encoding="utf-8")
+    mapping, built = cpcb._read_sensor_cache(path)
+    assert mapping == {"DL001": [1, 2]}
+    assert built is None
+
+
+def test_a_current_cache_reports_when_it_was_built(tmp_path):
+    path = tmp_path / "openaq_sensors.json"
+    when = dt.datetime.now(dt.timezone.utc)
+    path.write_text(
+        json.dumps({"built": when.isoformat(), "stations": {"DL001": [7]}}),
+        encoding="utf-8",
+    )
+    mapping, built = cpcb._read_sensor_cache(path)
+    assert mapping == {"DL001": [7]}
+    assert built is not None and abs((built - when).total_seconds()) < 1
+
+
+def test_an_unreadable_cache_forces_a_rebuild(tmp_path):
+    path = tmp_path / "openaq_sensors.json"
+    path.write_text("{not json", encoding="utf-8")
+    assert cpcb._read_sensor_cache(path) == ({}, None)
