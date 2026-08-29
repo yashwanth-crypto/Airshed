@@ -226,10 +226,26 @@ async function loadLive() {
                       : '<span class="muted">below Stage I</span>';
       const t = new Date(h.target_time).toLocaleString("en-IN",
         {weekday:"short", hour:"2-digit", minute:"2-digit", timeZone:"Asia/Kolkata"});
+      // Horizons are measured from the last hour we hold observations for, not
+      // from now -- a forecast made at 06:00 with data to 03:00 really is issued
+      // at 03:00. That is honest while the feed is hours behind and misleading
+      // once it is days behind: on 2026-08-29, with observations stuck at the
+      // 27th, "+24 h · Fri 06:30 IST" described a time that had already passed.
+      // Say so, rather than presenting yesterday as a forecast.
+      const elapsed = new Date(h.target_time) < new Date();
+      const lead = elapsed
+        ? `<b>+${h.horizon_h} h</b><br><span class="caveat">already elapsed</span>`
+        : `<b>+${h.horizon_h} h</b>`;
+      // A blank is not a failure worth hiding, but a bare dash explains nothing.
+      // It means this target fell outside the newest CAMS run: the observation
+      // anchor has drifted so far back that the shortest lead now lands before
+      // the run window opens.
+      const value = (h.city_pm25 === null || h.city_pm25 === undefined)
+        ? `<span class="muted" title="This target falls outside the newest CAMS run, because the observation anchor has fallen behind it.">no run coverage</span>`
+        : `<b>${fmt(h.city_pm25)}</b><br><span class="muted">${fmt(h.lower)}–${fmt(h.upper)}</span>`;
       return `<tr>
-        <td><b>+${h.horizon_h} h</b><br><span class="muted">${t} IST</span></td>
-        <td class="num"><b>${fmt(h.city_pm25)}</b><br>
-            <span class="muted">${fmt(h.lower)}–${fmt(h.upper)}</span></td>
+        <td>${lead}<br><span class="muted">${t} IST</span></td>
+        <td class="num">${value}</td>
         <td>${label}<br><span class="muted">P(≥III) ${((h.grap.at_least_3??0)*100).toFixed(0)}%</span></td>
       </tr>`;
     }).join("");
