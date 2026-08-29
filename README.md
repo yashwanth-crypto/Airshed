@@ -11,6 +11,41 @@ Read `CLAUDE.md` before touching anything; the hard rules there are load-bearing
 **Resuming work? Start with `docs/STATUS.md`** — what is done, what is
 pending, and the silent failure modes already found and fixed.
 
+## What it looks like
+
+![The live 72-hour forecast, GRAP stage probabilities and driver attribution](docs/screenshots/dashboard-forecast.png)
+
+The dashboard on 2026-08-24. Every number carries its 10–90% interval, the GRAP
+panel converts the predicted *distribution* into a probability per stage rather
+than a single label, and the drivers explain the **correction to CAMS** — not the
+pollution itself, which is a distinction the panel states rather than blurs.
+"Issued from observations to … (5.6 h ago)" is the CPCB feed's normal lag, shown
+instead of hidden (R8).
+
+![The downscaled surface over NCR, and the local cache it is served from](docs/screenshots/dashboard-surface.png)
+
+The wind-aware downscaled surface on a 0.05° grid with the 77-station network
+overlaid, and the cache behind it. Held-out station error is **82.6 µg/m³**
+leave-one-station-out — the map says which part of the city is worse, not what an
+unmonitored block will read (R7). Nothing on the page makes a network call: the
+whole demo is served from local Parquet, and a CPCB outage degrades it to a stale
+timestamp rather than an error page.
+
+## How it fits together
+
+![End-to-end flow: sources, ingest, cache, features, models, evaluation gate, serving](docs/airshed-flow.png)
+
+Five free sources → one local cache → one aligned hourly table → a correction
+learned on top of CAMS → an evaluation that has to beat persistence → a GRAP
+probability with 72 hours of lead. The stage-by-stage walkthrough, the GRAP
+mapping chain and the operations loop are in **[`docs/FLOWCHART.md`](docs/FLOWCHART.md)**.
+
+Two things the diagram is drawn to make explicit. The training path and the
+serving path share one feature builder on purpose — the moment they construct
+inputs differently, the measured skill stops being real. And the evaluation gate
+is a real branch: a result that does not clear persistence is published as a
+negative result rather than quietly dropped.
+
 ## Setup
 
 ```bash
